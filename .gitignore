@@ -1,0 +1,20 @@
+.venv/
+ai_snake_battle/.git_old_nested/
+__pycache__/
+*.pyc
+
+# Generated recordings and captures
+ai_snake_battle/window_recordings/
+ai_snake_battle/recordings/
+ai_snake_battle/recordings_test/
+ai_snake_battle/music_test/
+ai_snake_battle/frames/
+frames/
+screenshot_*.png
+
+# Local editor/system files
+.idea/
+.vscode/
+*.log
+Thumbs.db
+.DS_Store
