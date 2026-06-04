@@ -9,8 +9,11 @@ ai_snake_battle/recordings/
 ai_snake_battle/recordings_test/
 ai_snake_battle/music_test/
 ai_snake_battle/frames/
+ai_platformer_battle/window_recordings/
+ai_shooter_battle/window_recordings/
 frames/
 screenshot_*.png
+platformer_screenshot_*.png
 
 # Local editor/system files
 .idea/

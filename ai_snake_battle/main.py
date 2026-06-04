@@ -2,16 +2,16 @@ import argparse
 import math
 import os
 import random
-import shutil
-import subprocess
-import time
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, IO, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-# Without this, Windows display scaling can make ffmpeg capture a larger
-# physical window where the pygame surface occupies only the top-left corner.
-os.environ.setdefault("SDL_VIDEO_HIGHDPI_DISABLED", "1")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from window_recorder import WindowRecorder
 
 import pygame
 
@@ -227,23 +227,24 @@ class Game:
         self.end_timer = 0.0
         self.match_time = 0.0
         self.max_match_seconds = max(1, time_limit)
-        self.record_window_enabled = record_window
-        self.window_record_fps = max(1, min(60, window_record_fps))
-        self.window_record_root = os.path.abspath(window_record_dir)
-        self.window_record_match_index = 0
-        self.window_record_process: Optional[subprocess.Popen] = None
-        self.window_record_log: Optional[IO[str]] = None
-        self.window_record_path = ""
-        self.window_record_music_path = ""
-        self.window_record_log_path = ""
-        self.window_record_start_pending = False
-        self.window_record_finished = False
-        self.music_path = os.path.abspath(music_path) if music_path else ""
-        self.music_volume = max(0.0, min(1.0, music_volume))
+        self.window_recorder = WindowRecorder(
+            enabled=record_window,
+            window_title=WINDOW_TITLE,
+            output_root=window_record_dir,
+            session_prefix="snake_battle",
+            video_filename="snake_battle_window.mp4",
+            music_filename="snake_battle_window_music.mp4",
+            fps=window_record_fps,
+            capture_size=WINDOW_RECORD_CAPTURE_SIZE,
+            output_size=WINDOW_RECORD_OUTPUT_SIZE,
+            end_delay_seconds=WINDOW_RECORD_END_DELAY_SECONDS,
+            music_path=music_path,
+            music_volume=music_volume,
+        )
         self.restart()
 
     def restart(self) -> None:
-        self.stop_window_recording()
+        self.window_recorder.new_match()
         self.snakes = []
         self.foods = []
         self.particles = []
@@ -252,175 +253,9 @@ class Game:
         self.finish_reason = ""
         self.end_timer = 0.0
         self.match_time = 0.0
-        self.window_record_start_pending = self.record_window_enabled
-        self.window_record_finished = False
         self.create_snakes()
         for _ in range(FOOD_COUNT):
             self.spawn_food()
-
-    def prepare_window_recording(self) -> None:
-        self.window_record_match_index += 1
-        stamp = time.strftime("%Y%m%d_%H%M%S")
-        session_dir = os.path.join(self.window_record_root, f"snake_battle_{stamp}_{self.window_record_match_index:02d}")
-        os.makedirs(session_dir, exist_ok=True)
-        self.window_record_path = os.path.join(session_dir, "snake_battle_window.mp4")
-        self.window_record_music_path = os.path.join(session_dir, "snake_battle_window_music.mp4")
-        self.window_record_log_path = os.path.join(session_dir, "ffmpeg.log")
-        self.window_record_log = open(self.window_record_log_path, "w", encoding="utf-8")
-
-    def start_window_recording(self) -> None:
-        if not self.record_window_enabled or self.window_record_process:
-            return
-        ffmpeg = shutil.which("ffmpeg")
-        if not ffmpeg:
-            print("ffmpeg not found. Window recording is disabled.")
-            self.window_record_finished = True
-            return
-
-        self.prepare_window_recording()
-        command = [
-            ffmpeg,
-            "-y",
-            "-f",
-            "gdigrab",
-            "-draw_mouse",
-            "0",
-            "-framerate",
-            str(self.window_record_fps),
-            "-video_size",
-            f"{WINDOW_RECORD_CAPTURE_SIZE[0]}x{WINDOW_RECORD_CAPTURE_SIZE[1]}",
-            "-i",
-            f"title={WINDOW_TITLE}",
-            "-vf",
-            f"scale={WINDOW_RECORD_OUTPUT_SIZE[0]}:{WINDOW_RECORD_OUTPUT_SIZE[1]}:flags=lanczos,setsar=1,format=yuv420p",
-            "-c:v",
-            "libx264",
-            "-profile:v",
-            "baseline",
-            "-level:v",
-            "4.0",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-tag:v",
-            "avc1",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            self.window_record_path,
-        ]
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        try:
-            self.window_record_process = subprocess.Popen(
-                command,
-                stdin=subprocess.PIPE,
-                stdout=self.window_record_log,
-                stderr=self.window_record_log,
-                creationflags=creationflags,
-            )
-            print(f"Window recording started: {self.window_record_path}")
-            print(
-                "Capture "
-                f"{WINDOW_RECORD_CAPTURE_SIZE[0]}x{WINDOW_RECORD_CAPTURE_SIZE[1]} -> "
-                f"{WINDOW_RECORD_OUTPUT_SIZE[0]}x{WINDOW_RECORD_OUTPUT_SIZE[1]}"
-            )
-        except OSError as exc:
-            print(f"Could not start ffmpeg window recording: {exc}")
-            self.close_window_record_log()
-            self.window_record_finished = True
-
-    def close_window_record_log(self) -> None:
-        if self.window_record_log:
-            self.window_record_log.close()
-            self.window_record_log = None
-
-    def stop_window_recording(self) -> None:
-        process = self.window_record_process
-        if not process:
-            self.close_window_record_log()
-            return
-
-        if process.poll() is None:
-            try:
-                if process.stdin:
-                    process.stdin.write(b"q\n")
-                    process.stdin.flush()
-                    process.stdin.close()
-                process.wait(timeout=8)
-            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-
-        return_code = process.returncode
-        self.window_record_process = None
-        self.close_window_record_log()
-        self.window_record_finished = True
-        if return_code == 0:
-            print(f"Window recording saved: {self.window_record_path}")
-            self.add_music_to_recording()
-        else:
-            print(f"Window recording stopped with ffmpeg code {return_code}. Log: {self.window_record_log_path}")
-
-    def monitor_window_recording(self) -> None:
-        process = self.window_record_process
-        if process and process.poll() is not None:
-            return_code = process.returncode
-            self.window_record_process = None
-            self.close_window_record_log()
-            self.window_record_finished = True
-            print(f"Window recording process ended with code {return_code}. Log: {self.window_record_log_path}")
-
-    def add_music_to_recording(self) -> None:
-        if not self.music_path:
-            return
-        if not os.path.exists(self.music_path):
-            print(f"Music file not found: {self.music_path}")
-            return
-
-        ffmpeg = shutil.which("ffmpeg")
-        if not ffmpeg:
-            print("ffmpeg not found. Cannot add music.")
-            return
-
-        command = [
-            ffmpeg,
-            "-y",
-            "-i",
-            self.window_record_path,
-            "-stream_loop",
-            "-1",
-            "-i",
-            self.music_path,
-            "-filter:a",
-            f"volume={self.music_volume}",
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-            self.window_record_music_path,
-        ]
-        print("Adding background music...")
-        result = subprocess.run(command, capture_output=True, text=True)
-        if result.returncode == 0:
-            print(f"Video with music saved: {self.window_record_music_path}")
-        else:
-            print("Could not add music. Original video is still saved.")
-            print(result.stderr[-1200:])
 
     def create_snakes(self) -> None:
         # Edit this list to add, remove, recolor, or retune AI players.
@@ -710,7 +545,7 @@ class Game:
         return random.choice(options)
 
     def update(self, dt: float) -> None:
-        self.monitor_window_recording()
+        self.window_recorder.monitor()
         if self.paused:
             return
         for snake in self.snakes:
@@ -721,8 +556,7 @@ class Game:
 
         if self.game_over:
             self.end_timer += dt
-            if self.record_window_enabled and not self.window_record_finished and self.end_timer >= WINDOW_RECORD_END_DELAY_SECONDS:
-                self.stop_window_recording()
+            self.window_recorder.stop_after_game_over(self.end_timer)
             return
 
         self.match_time += dt
@@ -890,9 +724,7 @@ class Game:
         if self.paused:
             self.draw_pause()
         pygame.display.flip()
-        if self.window_record_start_pending:
-            self.window_record_start_pending = False
-            self.start_window_recording()
+        self.window_recorder.start_if_pending()
 
     def draw_header(self) -> None:
         title = self.font_title.render("AI SNAKE BATTLE", True, WHITE)
@@ -978,7 +810,7 @@ class Game:
             running = self.handle_events()
             self.update(dt)
             self.draw()
-        self.stop_window_recording()
+        self.window_recorder.stop()
         pygame.quit()
 
 
