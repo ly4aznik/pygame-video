@@ -1,8 +1,10 @@
 import os
+import queue
 import shutil
 import subprocess
+import threading
 import time
-from typing import IO, Optional, Tuple
+from typing import IO, List, Optional, Tuple
 
 
 # Set this before pygame is imported by game modules. It avoids Windows DPI
@@ -32,6 +34,11 @@ class WindowRecorder:
         music_path: str = "",
         music_volume: float = 0.25,
         draw_mouse: bool = False,
+        capture_audio: bool = False,
+        audio_source: str = "",
+        audio_backend: str = "dshow",
+        audio_volume: float = 1.0,
+        pipe_video: bool = False,
     ) -> None:
         self.enabled = enabled
         self.window_title = window_title
@@ -46,15 +53,25 @@ class WindowRecorder:
         self.music_path = os.path.abspath(music_path) if music_path else ""
         self.music_volume = max(0.0, min(1.0, music_volume))
         self.draw_mouse = draw_mouse
+        self.capture_audio_requested = capture_audio
+        self.capture_audio = capture_audio
+        self.audio_source = audio_source
+        self.audio_backend = audio_backend.lower().strip() or "dshow"
+        self.audio_volume = max(0.0, min(2.0, audio_volume))
+        self.pipe_video = pipe_video
 
         self.match_index = 0
         self.process: Optional[subprocess.Popen] = None
         self.log_file: Optional[IO[str]] = None
         self.video_path = ""
+        self.capture_path = ""
         self.video_with_music_path = ""
         self.log_path = ""
         self.start_pending = False
         self.finished = False
+        self.next_frame_time = 0.0
+        self.frame_queue: Optional[queue.Queue[Optional[bytes]]] = None
+        self.frame_writer: Optional[threading.Thread] = None
 
     def new_match(self) -> None:
         self.stop()
@@ -70,12 +87,12 @@ class WindowRecorder:
     def monitor(self) -> None:
         if self.process and self.process.poll() is not None:
             return_code = self.process.returncode
+            self._stop_frame_writer()
             self.process = None
             self._close_log()
             self.finished = True
             if return_code == 0:
-                print(f"Window recording saved: {self.video_path}")
-                self.add_music()
+                self.finish_recording()
             else:
                 print(f"Window recording process ended with code {return_code}. Log: {self.log_path}")
 
@@ -91,41 +108,157 @@ class WindowRecorder:
             print("ffmpeg not found. Window recording is disabled.")
             self.finished = True
             return
+        if self.capture_audio:
+            self.audio_source = self.resolve_audio_source(ffmpeg)
+            self.capture_audio = bool(self.audio_source) and self.ffmpeg_supports_device(ffmpeg, self.audio_backend)
 
         self._prepare_session()
-        command = [
-            ffmpeg,
-            "-y",
-            "-f",
-            "gdigrab",
-            "-draw_mouse",
-            "1" if self.draw_mouse else "0",
-            "-framerate",
-            str(self.fps),
-            "-video_size",
-            f"{self.capture_size[0]}x{self.capture_size[1]}",
-            "-i",
-            f"title={self.window_title}",
-            "-vf",
-            f"scale={self.output_size[0]}:{self.output_size[1]}:flags=lanczos,setsar=1,format=yuv420p",
-            "-c:v",
-            "libx264",
-            "-profile:v",
-            "baseline",
-            "-level:v",
-            "4.0",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-tag:v",
-            "avc1",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            self.video_path,
-        ]
+        command = [ffmpeg, "-y", "-thread_queue_size", "512"]
+        if self.pipe_video:
+            command.extend(
+                [
+                    "-f",
+                    "rawvideo",
+                    "-pixel_format",
+                    "rgb24",
+                    "-video_size",
+                    f"{self.capture_size[0]}x{self.capture_size[1]}",
+                    "-framerate",
+                    str(self.fps),
+                    "-i",
+                    "pipe:0",
+                ]
+            )
+        else:
+            command.extend(
+                [
+                    "-f",
+                    "gdigrab",
+                    "-draw_mouse",
+                    "1" if self.draw_mouse else "0",
+                    "-framerate",
+                    str(self.fps),
+                    "-video_size",
+                    f"{self.capture_size[0]}x{self.capture_size[1]}",
+                    "-i",
+                    f"title={self.window_title}",
+                ]
+            )
+        if self.capture_audio:
+            if self.audio_backend == "wasapi":
+                command.extend(
+                    [
+                        "-thread_queue_size",
+                        "512",
+                        "-f",
+                        "wasapi",
+                        "-loopback",
+                        "1",
+                        "-i",
+                        self.audio_source,
+                    ]
+                )
+            else:
+                command.extend(
+                    [
+                        "-thread_queue_size",
+                        "512",
+                        "-f",
+                        "dshow",
+                        "-i",
+                        f"audio={self.audio_source}",
+                    ]
+                )
+            command.extend(
+                [
+                    "-filter_complex",
+                    (
+                        f"[0:v]setpts=PTS-STARTPTS,fps={self.fps},"
+                        "setsar=1,format=yuv420p[v];"
+                        f"[1:a]asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0,"
+                        f"volume={self.audio_volume}[a]"
+                    ),
+                    "-map",
+                    "[v]",
+                    "-map",
+                    "[a]",
+                ]
+            )
+        else:
+            command.extend(
+                [
+                    "-vf",
+                    f"fps={self.fps},setsar=1,format=yuv420p",
+                ]
+            )
+        if self.pipe_video:
+            command.extend(
+                [
+                    "-c:v",
+                    "h264_amf",
+                    "-quality",
+                    "speed",
+                    "-usage",
+                    "lowlatency",
+                    "-rc",
+                    "cqp",
+                    "-qp_i",
+                    "20",
+                    "-qp_p",
+                    "22",
+                ]
+            )
+        else:
+            command.extend(
+                [
+                    "-c:v",
+                    "libx264",
+                    "-profile:v",
+                    "baseline",
+                    "-level:v",
+                    "4.0",
+                    "-preset",
+                    "ultrafast",
+                    "-crf",
+                    "22",
+                ]
+            )
+        command.extend(
+            [
+                "-fps_mode",
+                "cfr",
+                "-tag:v",
+                "avc1",
+                "-pix_fmt",
+                "yuv420p",
+                "-color_primaries",
+                "bt709",
+                "-color_trc",
+                "bt709",
+                "-colorspace",
+                "bt709",
+                *(
+                    [
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "192k",
+                    ]
+                    if self.capture_audio
+                    else []
+                ),
+                "-movflags",
+                "+faststart",
+                *(
+                    [
+                        "-shortest",
+                    ]
+                    if self.pipe_video and self.capture_audio
+                    else []
+                ),
+                self.capture_path,
+            ]
+        )
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
             self.process = subprocess.Popen(
@@ -135,28 +268,147 @@ class WindowRecorder:
                 stderr=self.log_file,
                 creationflags=creationflags,
             )
-            print(f"Window recording started: {self.video_path}")
+            self.next_frame_time = time.perf_counter()
+            if self.pipe_video:
+                self.frame_queue = queue.Queue(maxsize=3)
+                self.frame_writer = threading.Thread(target=self._frame_writer_loop, daemon=True)
+                self.frame_writer.start()
+            print(f"Window recording started: {self.capture_path}")
             print(
-                "Capture "
-                f"{self.capture_size[0]}x{self.capture_size[1]} -> "
-                f"{self.output_size[0]}x{self.output_size[1]}"
+                f"Live capture {self.capture_size[0]}x{self.capture_size[1]}; "
+                f"final output {self.output_size[0]}x{self.output_size[1]}"
             )
+            if self.capture_audio:
+                if self.audio_backend == "wasapi":
+                    print(f"Live audio capture enabled: wasapi loopback '{self.audio_source}'")
+                else:
+                    print(f"Live audio capture enabled: dshow audio='{self.audio_source}'")
+            elif self.capture_audio_requested:
+                print(f"Live audio capture disabled: ffmpeg cannot open {self.audio_backend} audio '{self.audio_source}'.")
         except OSError as exc:
             print(f"Could not start ffmpeg window recording: {exc}")
             self._close_log()
             self.finished = True
 
+    def write_video_frame(self, rgb_frame: bytes) -> None:
+        if not self.needs_video_frame():
+            return
+        now = time.perf_counter()
+        frame_interval = 1.0 / self.fps
+        try:
+            if self.frame_queue:
+                self.frame_queue.put_nowait(rgb_frame)
+        except queue.Full:
+            try:
+                self.frame_queue.get_nowait()
+                self.frame_queue.put_nowait(rgb_frame)
+            except (queue.Empty, queue.Full):
+                pass
+        self.next_frame_time = now + frame_interval
+
+    def needs_video_frame(self) -> bool:
+        return bool(
+            self.pipe_video
+            and self.process
+            and self.process.poll() is None
+            and time.perf_counter() >= self.next_frame_time
+        )
+
+    def _frame_writer_loop(self) -> None:
+        while self.frame_queue:
+            frame = self.frame_queue.get()
+            if frame is None:
+                return
+            try:
+                if self.process and self.process.stdin:
+                    self.process.stdin.write(frame)
+                    self.process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                return
+
+    def _stop_frame_writer(self) -> None:
+        if not self.frame_queue or not self.frame_writer:
+            return
+        while True:
+            try:
+                self.frame_queue.put_nowait(None)
+                break
+            except queue.Full:
+                try:
+                    self.frame_queue.get_nowait()
+                except queue.Empty:
+                    break
+        self.frame_writer.join(timeout=5)
+        self.frame_queue = None
+        self.frame_writer = None
+
+    def resolve_audio_source(self, ffmpeg: str) -> str:
+        if self.audio_source and self.audio_source.lower() != "auto":
+            return self.audio_source
+        if self.audio_backend == "wasapi":
+            return "default"
+        devices = self.list_dshow_audio_devices(ffmpeg)
+        if not devices:
+            return ""
+        preferred = [
+            "virtual-audio-capturer",
+            "stereo mix",
+            "what u hear",
+            "cable output",
+            "vb-audio",
+            "voicemeeter",
+            "wave out mix",
+            "loopback",
+            "speakers",
+            "output",
+        ]
+        for needle in preferred:
+            for device in devices:
+                if needle in device.lower():
+                    return device
+        print("DirectShow audio devices found, but none look like system-audio loopback:")
+        for device in devices:
+            print(f"  {device}")
+        return ""
+
+    def list_dshow_audio_devices(self, ffmpeg: str) -> List[str]:
+        command = [ffmpeg, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=8)
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        devices = []
+        for line in (result.stderr + result.stdout).splitlines():
+            if "(audio)" not in line:
+                continue
+            first = line.find('"')
+            second = line.find('"', first + 1)
+            if first >= 0 and second > first:
+                devices.append(line[first + 1 : second])
+        return devices
+
+    def ffmpeg_supports_device(self, ffmpeg: str, device_name: str) -> bool:
+        try:
+            result = subprocess.run([ffmpeg, "-hide_banner", "-devices"], capture_output=True, text=True, timeout=8)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        needle = f" {device_name}"
+        return any(needle in line for line in (result.stdout + result.stderr).splitlines())
+
     def stop(self) -> None:
         process = self.process
         if not process:
+            self._stop_frame_writer()
             self._close_log()
             return
 
         if process.poll() is None:
             try:
+                self._stop_frame_writer()
                 if process.stdin:
-                    process.stdin.write(b"q\n")
-                    process.stdin.flush()
+                    if not self.pipe_video:
+                        process.stdin.write(b"q\n")
+                        process.stdin.flush()
                     process.stdin.close()
                 process.wait(timeout=8)
             except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
@@ -172,10 +424,68 @@ class WindowRecorder:
         self._close_log()
         self.finished = True
         if return_code == 0:
-            print(f"Window recording saved: {self.video_path}")
-            self.add_music()
+            self.finish_recording()
         else:
             print(f"Window recording stopped with ffmpeg code {return_code}. Log: {self.log_path}")
+
+    def finish_recording(self) -> None:
+        if not self.resize_recording():
+            print(f"Raw window recording saved: {self.capture_path}")
+            return
+        print(f"Window recording saved: {self.video_path}")
+        self.add_music()
+
+    def resize_recording(self) -> bool:
+        if self.capture_path == self.video_path:
+            return True
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            print("ffmpeg not found. Cannot create final-size recording.")
+            return False
+
+        command = [
+            ffmpeg,
+            "-y",
+            "-i",
+            self.capture_path,
+            "-vf",
+            (
+                "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709,"
+                f"scale={self.output_size[0]}:{self.output_size[1]}:flags=lanczos,"
+                "fps=30,setsar=1,format=yuv420p"
+            ),
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-level:v",
+            "4.0",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-tag:v",
+            "avc1",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            self.video_path,
+        ]
+        print("Creating final-size recording...")
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            print("Could not create final-size recording.")
+            print(result.stderr[-1200:])
+            return False
+        try:
+            os.remove(self.capture_path)
+        except OSError:
+            pass
+        return True
 
     def add_music(self) -> None:
         if not self.music_path:
@@ -229,6 +539,12 @@ class WindowRecorder:
         session_dir = os.path.join(self.output_root, f"{self.session_prefix}_{stamp}_{self.match_index:02d}")
         os.makedirs(session_dir, exist_ok=True)
         self.video_path = os.path.join(session_dir, self.video_filename)
+        capture_name = f"_live_{self.video_filename}"
+        self.capture_path = (
+            os.path.join(session_dir, capture_name)
+            if self.capture_size != self.output_size
+            else self.video_path
+        )
         self.video_with_music_path = os.path.join(session_dir, self.music_filename)
         self.log_path = os.path.join(session_dir, "ffmpeg.log")
         self.log_file = open(self.log_path, "w", encoding="utf-8")

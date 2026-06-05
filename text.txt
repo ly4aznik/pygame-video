@@ -1,0 +1,8 @@
+Pick your ball before the rings start breaking. 🔴🔵
+
+Two physics balls, one shrinking maze of spinning circles.
+Every gap is a chance to score, every bounce can change the winner.
+
+Who pops more rings: red or blue?
+
+#ballgame #physicsgame #simulation #pygame #gamedev #reels

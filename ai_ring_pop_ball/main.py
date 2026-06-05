@@ -30,11 +30,12 @@ BOARD_HEIGHT = BOARD_SIZE
 BOARD_CENTER = (WIDTH // 2, BOARD_TOP + BOARD_HEIGHT // 2)
 SCORE_TOP = BOARD_TOP + BOARD_HEIGHT + 11
 MATCH_TIME_LIMIT_SECONDS = 120
-WINDOW_RECORD_FPS = 30
-WINDOW_RECORD_CAPTURE_SIZE = (WIDTH, HEIGHT)
+WINDOW_RECORD_FPS = 15
+WINDOW_RECORD_CAPTURE_SIZE = (270, 480)
 WINDOW_RECORD_OUTPUT_SIZE = (1080, 1920)
 WINDOW_RECORD_END_DELAY_SECONDS = 1.0
 WINDOW_RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "window_recordings")
+DEFAULT_RECORD_AUDIO_SOURCE = "CABLE Output (VB-Audio Virtual Cable)"
 
 RING_COUNT = 33
 RING_THICKNESS = 4
@@ -48,8 +49,10 @@ BALL_RADIUS = 7
 BALL_GRAVITY = 170.0
 BALL_INITIAL_SPEED = 126.0
 BALL_MIN_SPEED = 112.0
-BALL_MAX_SPEED = 245.0
+BALL_MAX_SPEED = 7_000.0
 BOUNCE_DAMPING = 0.988
+HIT_SPEED_MULTIPLIER = 1.05
+LEVEL_PRELOAD_SECONDS = 0.75
 
 POP_SFX_VOLUME = 0.42
 BG_MUSIC_VOLUME = 0.18
@@ -88,6 +91,18 @@ def mix(a: Color, b: Color, amount: float) -> Color:
 
 def length(x: float, y: float) -> float:
     return math.hypot(x, y)
+
+
+def format_speed(speed: float) -> str:
+    if speed >= BALL_MAX_SPEED * 0.995:
+        return "∞"
+    if speed < 1000:
+        return str(int(speed))
+    units = [("B", 1_000_000_000), ("M", 1_000_000), ("K", 1_000)]
+    for suffix, scale in units:
+        if speed >= scale and speed < scale * 1000:
+            return f"{speed / scale:.1f}{suffix}".replace(".0", "")
+    return f"{speed:.1e}"
 
 
 def normalize_angle(angle: float) -> float:
@@ -198,6 +213,11 @@ class Ball:
             self.vx *= scale
             self.vy *= scale
 
+    def speed_up_after_hit(self) -> None:
+        self.vx *= HIT_SPEED_MULTIPLIER
+        self.vy *= HIT_SPEED_MULTIPLIER
+        self.limit_speed()
+
     def draw(self, surface: pygame.Surface) -> None:
         glow_size = self.radius * 7
         glow = pygame.Surface((glow_size, glow_size), pygame.SRCALPHA)
@@ -226,7 +246,8 @@ class PopSound:
             self.sounds = []
             self.enabled = False
 
-    def create_sound(self, pitch_scale: float) -> pygame.mixer.Sound:
+    @classmethod
+    def create_sound_frames(cls, pitch_scale: float) -> bytes:
         sample_rate = 44100
         duration = 0.13
         total = int(sample_rate * duration)
@@ -241,14 +262,23 @@ class PopSound:
             snap = 0.22 * math.sin(math.tau * 1840.0 * t) * max(0.0, 1.0 - progress * 8.0)
             value = int(15500 * envelope * (tone + overtone + snap))
             frames.extend(struct.pack("<h", max(-32767, min(32767, value))))
-        return pygame.mixer.Sound(buffer=bytes(frames))
+        return bytes(frames)
 
-    def play(self) -> None:
+    def create_sound(self, pitch_scale: float) -> pygame.mixer.Sound:
+        return pygame.mixer.Sound(buffer=self.create_sound_frames(pitch_scale))
+
+    def play(self) -> Optional[int]:
         if self.enabled and self.sounds:
-            random.choice(self.sounds).play()
+            index = random.randrange(len(self.sounds))
+            self.sounds[index].play()
+            return index
+        return None
 
 
 class BackgroundMusic:
+    SAMPLE_RATE = 44100
+    DURATION_SECONDS = 8.0
+
     def __init__(self, volume: float = BG_MUSIC_VOLUME) -> None:
         self.sound: Optional[pygame.mixer.Sound] = None
         self.channel: Optional[pygame.mixer.Channel] = None
@@ -264,8 +294,12 @@ class BackgroundMusic:
             self.enabled = False
 
     def create_loop(self) -> pygame.mixer.Sound:
-        sample_rate = 44100
-        duration = 8.0
+        return pygame.mixer.Sound(buffer=self.create_loop_frames())
+
+    @classmethod
+    def create_loop_frames(cls) -> bytes:
+        sample_rate = cls.SAMPLE_RATE
+        duration = cls.DURATION_SECONDS
         total = int(sample_rate * duration)
         frames = bytearray()
         bass_notes = [130.81, 146.83, 164.81, 196.00]
@@ -284,7 +318,7 @@ class BackgroundMusic:
             fade = min(1.0, index / 3200, (total - index) / 3200)
             value = int(9500 * fade * (bass_wave + bell_wave + pad))
             frames.extend(struct.pack("<h", max(-32767, min(32767, value))))
-        return pygame.mixer.Sound(buffer=bytes(frames))
+        return bytes(frames)
 
     def play(self) -> None:
         if self.enabled and self.sound and self.channel is None:
@@ -337,6 +371,7 @@ class Game:
         time_limit: int = MATCH_TIME_LIMIT_SECONDS,
         sfx_volume: float = POP_SFX_VOLUME,
         bg_music_volume: float = BG_MUSIC_VOLUME,
+        record_audio_source: str = DEFAULT_RECORD_AUDIO_SOURCE,
     ) -> None:
         pygame.mixer.pre_init(44100, -16, 1, 512)
         pygame.init()
@@ -359,6 +394,7 @@ class Game:
         self.end_timer = 0.0
         self.match_time = 0.0
         self.max_match_seconds = max(1, time_limit)
+        self.preload_timer = LEVEL_PRELOAD_SECONDS
         self.popped_count = 0
         self.last_pop_time = 0.0
         self.pop_sound = PopSound(sfx_volume)
@@ -375,8 +411,12 @@ class Game:
             capture_size=WINDOW_RECORD_CAPTURE_SIZE,
             output_size=WINDOW_RECORD_OUTPUT_SIZE,
             end_delay_seconds=WINDOW_RECORD_END_DELAY_SECONDS,
-            music_path=music_path,
+            music_path="",
             music_volume=music_volume,
+            capture_audio=record_window,
+            audio_source=record_audio_source,
+            audio_backend="dshow",
+            pipe_video=True,
         )
         self.restart()
 
@@ -409,6 +449,7 @@ class Game:
         self.finish_reason = ""
         self.end_timer = 0.0
         self.match_time = 0.0
+        self.preload_timer = LEVEL_PRELOAD_SECONDS
         self.popped_count = 0
         self.last_pop_time = 0.0
         self.create_rings()
@@ -446,6 +487,9 @@ class Game:
 
     def update(self, dt: float) -> None:
         self.window_recorder.monitor()
+        if self.preload_timer > 0.0:
+            self.preload_timer = max(0.0, self.preload_timer - dt)
+            return
         if self.paused:
             return
         if self.game_over:
@@ -492,15 +536,19 @@ class Game:
         if ball.x < left:
             ball.x = left
             ball.vx = abs(ball.vx) * BOUNCE_DAMPING
+            ball.speed_up_after_hit()
         elif ball.x > right:
             ball.x = right
             ball.vx = -abs(ball.vx) * BOUNCE_DAMPING
+            ball.speed_up_after_hit()
         if ball.y < top:
             ball.y = top
             ball.vy = abs(ball.vy) * BOUNCE_DAMPING
+            ball.speed_up_after_hit()
         elif ball.y > bottom:
             ball.y = bottom
             ball.vy = -abs(ball.vy) * BOUNCE_DAMPING
+            ball.speed_up_after_hit()
 
     def handle_ball_collisions(self) -> None:
         first, second = self.balls
@@ -530,8 +578,8 @@ class Game:
         first.vy -= impulse * ny
         second.vx += impulse * nx
         second.vy += impulse * ny
-        first.limit_speed()
-        second.limit_speed()
+        first.speed_up_after_hit()
+        second.speed_up_after_hit()
 
     def handle_ring_collisions(self, ball: Ball) -> None:
         ring = self.active_ring()
@@ -566,7 +614,7 @@ class Game:
         target_distance = ring.radius - collision_band - 1.2
         ball.x = cx + normal[0] * target_distance
         ball.y = cy + normal[1] * target_distance
-        ball.limit_speed()
+        ball.speed_up_after_hit()
 
     def keep_ball_inside_active_ring(self, ball: Ball) -> None:
         ring = self.active_ring()
@@ -630,13 +678,19 @@ class Game:
         self.draw_scoreboard()
         if self.game_over:
             self.draw_end_screen()
+        elif self.preload_timer > 0.0:
+            self.draw_preload()
         if self.paused:
             self.draw_pause()
         pygame.display.flip()
-        self.window_recorder.start_if_pending()
+        if self.preload_timer <= 0.0:
+            self.window_recorder.start_if_pending()
+            if self.window_recorder.needs_video_frame():
+                recording_frame = pygame.transform.scale(self.screen, WINDOW_RECORD_CAPTURE_SIZE)
+                self.window_recorder.write_video_frame(pygame.image.tobytes(recording_frame, "RGB"))
 
     def draw_header(self) -> None:
-        title = self.font_title.render("RING POP DUEL", True, WHITE)
+        title = self.font_title.render("1.05X EVERY HIT", True, WHITE)
         subtitle = self.font_subtitle.render("Red vs Blue", True, (94, 125, 145))
         remaining = max(0, int(self.max_match_seconds - self.match_time))
         live = RING_COUNT - self.popped_count
@@ -661,7 +715,7 @@ class Game:
         pygame.draw.rect(self.screen, PANEL, rect, border_radius=4)
         pygame.draw.rect(self.screen, (207, 216, 207), rect, 1, border_radius=4)
         headers = ["BALL", "POPPED", "SPEED", "STATUS"]
-        xs = [22, 112, 190, 267]
+        xs = [22, 122, 198, 267]
         for header, x in zip(headers, xs):
             self.screen.blit(self.font_small.render(header, True, MUTED), (x, SCORE_TOP + 8))
         active = self.active_ring()
@@ -669,12 +723,12 @@ class Game:
         status_color = SAFE if status in ("CLEARED", "clear") else (DANGER if status in ("CRUSHED", "TIME LIMIT") else WHITE)
         for index, ball in enumerate(self.balls):
             y = SCORE_TOP + 24 + index * 18
-            speed = int(length(ball.vx, ball.vy))
+            speed = format_speed(length(ball.vx, ball.vy))
             pygame.draw.circle(self.screen, ball.color, (24, y + 7), 5)
             row = [
                 (ball.name, 35, ball.color),
-                (f"{ball.score}/{RING_COUNT}", 121, WHITE),
-                (str(speed), 203, WHITE),
+                (f"{ball.score}/{RING_COUNT}", 131, WHITE),
+                (speed, 211, WHITE),
                 (status if index == 0 else "bounce", 267, status_color if index == 0 else MUTED),
             ]
             for text, x, color in row:
@@ -726,6 +780,10 @@ class Game:
         label = self.font_title.render("PAUSED", True, WHITE)
         self.screen.blit(label, label.get_rect(center=(WIDTH // 2, HEIGHT // 2)))
 
+    def draw_preload(self) -> None:
+        label = self.font_ui.render("LOADING LEVEL", True, MUTED)
+        self.screen.blit(label, label.get_rect(center=(WIDTH // 2, BOARD_TOP + BOARD_HEIGHT - 18)))
+
     def save_screenshot(self) -> None:
         pygame.image.save(self.screen, f"ring_pop_ball_screenshot_{pygame.time.get_ticks()}.png")
 
@@ -773,15 +831,20 @@ def parse_args() -> argparse.Namespace:
         help="folder for external window recordings",
     )
     parser.add_argument(
+        "--record-audio-source",
+        default=DEFAULT_RECORD_AUDIO_SOURCE,
+        help="DirectShow audio recording device, default records VB-CABLE output",
+    )
+    parser.add_argument(
         "--music",
         default="",
-        help="path to a local stock music file to add after the match recording finishes",
+        help="legacy option, unused for live game-audio window recording",
     )
     parser.add_argument(
         "--music-volume",
         type=float,
         default=0.25,
-        help="background music volume from 0.0 to 1.0, default 0.25",
+        help="legacy post-music volume, unused for live game-audio window recording",
     )
     parser.add_argument(
         "--sfx-volume",
@@ -815,4 +878,5 @@ if __name__ == "__main__":
         time_limit=args.time_limit,
         sfx_volume=args.sfx_volume,
         bg_music_volume=args.bg_music_volume,
+        record_audio_source=args.record_audio_source,
     ).run()

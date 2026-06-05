@@ -2,6 +2,8 @@
 ai_snake_battle/.git_old_nested/
 __pycache__/
 *.pyc
+*.mp4
+.selenium/
 
 # Generated recordings and captures
 ai_snake_battle/window_recordings/
@@ -11,6 +13,9 @@ ai_snake_battle/music_test/
 ai_snake_battle/frames/
 ai_platformer_battle/window_recordings/
 ai_shooter_battle/window_recordings/
+ai_ring_pop_ball/window_recordings/
+ai_marble_race/window_recordings/
+ai_hex_territory/window_recordings/
 frames/
 screenshot_*.png
 platformer_screenshot_*.png
