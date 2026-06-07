@@ -26,7 +26,7 @@ FACTION_COUNT = 4
 GROWTH_STYLE = "probabilistic"  # flood, directional, probabilistic
 CENTER_WEIGHT = 1.7
 NEUTRAL_DENSITY = 0.035
-FACTION_SPEEDS = (1.10, 0.96, 1.16, 1.03)
+FACTION_SPEEDS = (0.98, 0.96, 1.16, 1.03)
 START_POSITIONS: Sequence[Tuple[int, int]] = ()
 
 WIDTH, HEIGHT = 360, 640
@@ -40,23 +40,23 @@ WINDOW_RECORD_FPS = 30
 WINDOW_RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "window_recordings")
 DEFAULT_RECORD_AUDIO_SOURCE = "CABLE Output (VB-Audio Virtual Cable)"
 
-# Calm Reels palette from DESIGN_GUIDE.md.
-BG = (246, 248, 242)
-PANEL = (255, 255, 250)
-PANEL_LIGHT = (250, 252, 247)
-GRID = (222, 228, 218)
-TEXT = (42, 50, 62)
-MUTED = (126, 137, 139)
-DANGER = (210, 93, 96)
-NEUTRAL = (247, 249, 244)
-BLOCK = (174, 183, 180)
-GOLD = (221, 177, 76)
+# Clean, slightly neon broadcast palette.
+BG = (6, 10, 22)
+PANEL = (12, 19, 36)
+PANEL_LIGHT = (17, 27, 48)
+GRID = (39, 55, 78)
+TEXT = (237, 246, 255)
+MUTED = (126, 149, 174)
+DANGER = (255, 76, 105)
+NEUTRAL = (16, 25, 43)
+BLOCK = (49, 61, 78)
+GOLD = (255, 211, 74)
 
 FACTION_DATA = [
-    ("RED", (198, 104, 101), "CENTER RUSH"),
-    ("BLUE", (92, 139, 184), "SAFE CLUSTERS"),
-    ("GREEN", (104, 166, 129), "EDGE RUNNER"),
-    ("YELLOW", (221, 177, 76), "WILD CARD"),
+    ("RED", (255, 67, 104), "CENTER RUSH"),
+    ("BLUE", (45, 156, 255), "SAFE CLUSTERS"),
+    ("GREEN", (48, 230, 156), "EDGE RUNNER"),
+    ("YELLOW", (255, 205, 57), "WILD CARD"),
 ]
 
 Cell = Tuple[int, int]

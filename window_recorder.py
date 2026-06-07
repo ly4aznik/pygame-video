@@ -72,6 +72,7 @@ class WindowRecorder:
         self.next_frame_time = 0.0
         self.frame_queue: Optional[queue.Queue[Optional[bytes]]] = None
         self.frame_writer: Optional[threading.Thread] = None
+        self.video_encoder = "libx264"
 
     def new_match(self) -> None:
         self.stop()
@@ -111,6 +112,14 @@ class WindowRecorder:
         if self.capture_audio:
             self.audio_source = self.resolve_audio_source(ffmpeg)
             self.capture_audio = bool(self.audio_source) and self.ffmpeg_supports_device(ffmpeg, self.audio_backend)
+            if not self.capture_audio and self.audio_backend == "wasapi":
+                fallback_source = self.resolve_dshow_audio_source(ffmpeg)
+                if fallback_source and self.ffmpeg_supports_device(ffmpeg, "dshow"):
+                    print(f"WASAPI loopback unavailable; using DirectShow audio '{fallback_source}'.")
+                    self.audio_backend = "dshow"
+                    self.audio_source = fallback_source
+                    self.capture_audio = True
+        self.video_encoder = self.select_video_encoder(ffmpeg)
 
         self._prepare_session()
         command = [ffmpeg, "-y", "-thread_queue_size", "512"]
@@ -191,38 +200,7 @@ class WindowRecorder:
                     f"fps={self.fps},setsar=1,format=yuv420p",
                 ]
             )
-        if self.pipe_video:
-            command.extend(
-                [
-                    "-c:v",
-                    "h264_amf",
-                    "-quality",
-                    "speed",
-                    "-usage",
-                    "lowlatency",
-                    "-rc",
-                    "cqp",
-                    "-qp_i",
-                    "20",
-                    "-qp_p",
-                    "22",
-                ]
-            )
-        else:
-            command.extend(
-                [
-                    "-c:v",
-                    "libx264",
-                    "-profile:v",
-                    "baseline",
-                    "-level:v",
-                    "4.0",
-                    "-preset",
-                    "ultrafast",
-                    "-crf",
-                    "22",
-                ]
-            )
+        command.extend(self.encoder_args(self.video_encoder, fast=True))
         command.extend(
             [
                 "-fps_mode",
@@ -270,10 +248,11 @@ class WindowRecorder:
             )
             self.next_frame_time = time.perf_counter()
             if self.pipe_video:
-                self.frame_queue = queue.Queue(maxsize=3)
+                self.frame_queue = queue.Queue(maxsize=max(30, self.fps * 4))
                 self.frame_writer = threading.Thread(target=self._frame_writer_loop, daemon=True)
                 self.frame_writer.start()
             print(f"Window recording started: {self.capture_path}")
+            print(f"Video encoder: {self.video_encoder}")
             print(
                 f"Live capture {self.capture_size[0]}x{self.capture_size[1]}; "
                 f"final output {self.output_size[0]}x{self.output_size[1]}"
@@ -295,16 +274,17 @@ class WindowRecorder:
             return
         now = time.perf_counter()
         frame_interval = 1.0 / self.fps
-        try:
-            if self.frame_queue:
-                self.frame_queue.put_nowait(rgb_frame)
-        except queue.Full:
-            try:
-                self.frame_queue.get_nowait()
-                self.frame_queue.put_nowait(rgb_frame)
-            except (queue.Empty, queue.Full):
-                pass
-        self.next_frame_time = now + frame_interval
+        frames_due = max(1, int((now - self.next_frame_time) / frame_interval) + 1)
+        frames_due = min(frames_due, self.fps)
+        queued = 0
+        if self.frame_queue:
+            for _ in range(frames_due):
+                try:
+                    self.frame_queue.put_nowait(rgb_frame)
+                    queued += 1
+                except queue.Full:
+                    break
+        self.next_frame_time += queued * frame_interval
 
     def needs_video_frame(self) -> bool:
         return bool(
@@ -347,6 +327,9 @@ class WindowRecorder:
             return self.audio_source
         if self.audio_backend == "wasapi":
             return "default"
+        return self.resolve_dshow_audio_source(ffmpeg)
+
+    def resolve_dshow_audio_source(self, ffmpeg: str) -> str:
         devices = self.list_dshow_audio_devices(ffmpeg)
         if not devices:
             return ""
@@ -394,6 +377,37 @@ class WindowRecorder:
             return False
         needle = f" {device_name}"
         return any(needle in line for line in (result.stdout + result.stderr).splitlines())
+
+    def select_video_encoder(self, ffmpeg: str) -> str:
+        try:
+            result = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=8)
+            encoders = result.stdout + result.stderr
+        except (OSError, subprocess.TimeoutExpired):
+            return "libx264"
+        for encoder in ("h264_nvenc", "h264_amf", "h264_qsv", "libx264"):
+            if encoder in encoders:
+                return encoder
+        return "libx264"
+
+    def encoder_args(self, encoder: str, *, fast: bool) -> List[str]:
+        if encoder == "h264_nvenc":
+            return ["-c:v", encoder, "-preset", "p1" if fast else "p4", "-rc", "vbr", "-cq", "22" if fast else "20", "-b:v", "0"]
+        if encoder == "h264_amf":
+            return ["-c:v", encoder, "-quality", "speed" if fast else "balanced", "-rc", "cqp", "-qp_i", "20", "-qp_p", "22"]
+        if encoder == "h264_qsv":
+            return ["-c:v", encoder, "-preset", "veryfast" if fast else "medium", "-global_quality", "22" if fast else "20"]
+        return [
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-level:v",
+            "4.0",
+            "-preset",
+            "ultrafast" if fast else "veryfast",
+            "-crf",
+            "22" if fast else "20",
+        ]
 
     def stop(self) -> None:
         process = self.process
@@ -455,16 +469,7 @@ class WindowRecorder:
                 f"scale={self.output_size[0]}:{self.output_size[1]}:flags=lanczos,"
                 "fps=30,setsar=1,format=yuv420p"
             ),
-            "-c:v",
-            "libx264",
-            "-profile:v",
-            "baseline",
-            "-level:v",
-            "4.0",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
+            *self.encoder_args(self.video_encoder, fast=False),
             "-tag:v",
             "avc1",
             "-pix_fmt",

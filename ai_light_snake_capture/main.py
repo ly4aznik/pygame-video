@@ -1,7 +1,9 @@
 import argparse
+from array import array
 import math
 import os
 import random
+import struct
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
@@ -43,31 +45,143 @@ BONUS_BIG_SNAKE_MIN_DISTANCE = 10
 BONUS_REACHABILITY_CHECK_LIMIT = 70
 BONUS_RESPAWN_SECONDS = (7.0, 13.0)
 ERASER_BALL_RADIUS = 8
-ERASER_BALL_SPEED = 54.0
+ERASER_BALL_SPEED = 27.0
 
-BG = (246, 248, 242)
-PANEL = (255, 255, 250)
-GRID = (222, 228, 218)
-WHITE = (42, 50, 62)
-MUTED = (126, 137, 139)
-DANGER = (210, 93, 96)
-SAFE = (80, 145, 103)
-NEUTRAL_CELL = (250, 251, 246)
+BG = (8, 10, 18)
+PANEL = (18, 22, 35)
+GRID = (38, 45, 65)
+WHITE = (245, 247, 255)
+MUTED = (170, 178, 200)
+DANGER = (255, 70, 90)
+SAFE = (90, 240, 150)
+NEUTRAL_CELL = (13, 17, 29)
 
-YELLOW = (221, 177, 76)
-GREEN = (104, 166, 129)
-CORAL = (198, 104, 101)
-BLUE = (92, 139, 184)
-PURPLE = (150, 124, 180)
-TEAL = (86, 159, 164)
-BONUS_COLOR = (228, 170, 70)
-ERASER_COLOR = (64, 72, 82)
+YELLOW = (255, 210, 75)
+GREEN = (90, 240, 150)
+CORAL = (255, 70, 90)
+BLUE = (70, 150, 255)
+PURPLE = (190, 100, 255)
+TEAL = (55, 225, 225)
+BONUS_COLOR = (255, 190, 70)
+ERASER_COLOR = (255, 255, 255)
 
 Vec = Tuple[int, int]
 Cell = Tuple[int, int]
 Color = Tuple[int, int, int]
 
 DIRS: List[Vec] = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+
+
+def make_sound(frequency: float, duration: float, volume: float, slide: float = 0.0) -> pygame.mixer.Sound:
+    sample_rate = 44100
+    frames = bytearray()
+    count = int(sample_rate * duration)
+    for index in range(count):
+        progress = index / count
+        pitch = frequency * (1.0 + slide * progress)
+        envelope = math.sin(math.pi * progress) ** 0.45 * (1.0 - progress) ** 0.35
+        wave = math.sin(math.tau * pitch * index / sample_rate)
+        wave += 0.22 * math.sin(math.tau * pitch * 2.01 * index / sample_rate)
+        sample = int(max(-1.0, min(1.0, wave * envelope * volume)) * 32767)
+        frames.extend(struct.pack("<h", sample))
+    return pygame.mixer.Sound(buffer=bytes(frames))
+
+
+def make_voxel_sound(frequency: float, duration: float, volume: float, tone: str) -> pygame.mixer.Sound:
+    sample_rate = 44100
+    samples = array("h")
+    count = int(sample_rate * duration)
+    rng = random.Random(int(frequency * 100 + duration * 1000))
+    for index in range(count):
+        progress = index / count
+        phase = math.tau * frequency * index / sample_rate
+        if tone == "block":
+            envelope = (1.0 - progress) ** 5
+            wave = 0.58 * (1.0 if math.sin(phase) >= 0 else -1.0)
+            wave += rng.uniform(-0.42, 0.42) * (1.0 - progress)
+        elif tone == "glass":
+            envelope = math.exp(-5.5 * progress)
+            wave = math.sin(phase) + 0.48 * math.sin(phase * 2.01) + 0.24 * math.sin(phase * 3.98)
+        elif tone == "sand":
+            envelope = (1.0 - progress) ** 3
+            wave = rng.uniform(-1.0, 1.0) * 0.72 + math.sin(phase) * 0.28
+        elif tone == "bass":
+            envelope = math.sin(math.pi * progress) ** 0.35 * (1.0 - progress) ** 1.8
+            wave = math.sin(phase) + 0.3 * math.sin(phase * 0.5)
+        else:
+            envelope = math.exp(-4.0 * progress)
+            wave = math.sin(phase) + 0.2 * math.sin(phase * 2.0)
+        sample = int(max(-1.0, min(1.0, wave * envelope * volume)) * 32767)
+        samples.append(sample)
+    return pygame.mixer.Sound(buffer=samples.tobytes())
+
+
+def make_ambient_melody() -> pygame.mixer.Sound:
+    sample_rate = 44100
+    beat = 0.55
+    notes = [261.63, 329.63, 392.00, 493.88, 440.00, 392.00, 329.63, 293.66,
+             261.63, 329.63, 440.00, 392.00, 293.66, 349.23, 329.63, 261.63]
+    bass = [130.81, 130.81, 110.00, 110.00, 146.83, 146.83, 130.81, 130.81]
+    total = int(sample_rate * beat * len(notes))
+    samples = array("h")
+    for index in range(total):
+        time = index / sample_rate
+        note_index = min(len(notes) - 1, int(time / beat))
+        local = (time % beat) / beat
+        note = notes[note_index]
+        bass_note = bass[(note_index // 2) % len(bass)]
+        pluck = math.exp(-3.7 * local)
+        pad = 0.5 - 0.5 * math.cos(math.tau * min(1.0, local))
+        wave = math.sin(math.tau * note * time) * pluck * 0.12
+        wave += math.sin(math.tau * note * 2.002 * time) * pluck * 0.035
+        wave += math.sin(math.tau * bass_note * time) * (0.055 + pad * 0.018)
+        samples.append(int(max(-1.0, min(1.0, wave)) * 32767))
+    return pygame.mixer.Sound(buffer=samples.tobytes())
+
+
+class SoundBank:
+    def __init__(self) -> None:
+        self.enabled = False
+        self.countdown_channel: Optional[pygame.mixer.Channel] = None
+        self.music_channel: Optional[pygame.mixer.Channel] = None
+        self.music = None
+        self.start = self.big_capture = self.bonus = self.erase = self.death = self.finish = None
+        self.countdown = self.countdown_final = None
+        self.capture: List[pygame.mixer.Sound] = []
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
+            pygame.mixer.set_num_channels(16)
+            pygame.mixer.set_reserved(2)
+            self.countdown_channel = pygame.mixer.Channel(0)
+            self.music_channel = pygame.mixer.Channel(1)
+            self.start = make_voxel_sound(392, .42, .28, "glass")
+            self.capture = [make_voxel_sound(pitch, .075, .17, "block") for pitch in (196, 220, 247, 262)]
+            self.big_capture = make_voxel_sound(294, .34, .28, "glass")
+            self.bonus = make_voxel_sound(784, .55, .28, "glass")
+            self.erase = make_voxel_sound(105, .18, .22, "sand")
+            self.death = make_voxel_sound(123, .42, .30, "bass")
+            self.countdown = make_voxel_sound(523, .15, .34, "block")
+            self.countdown_final = make_voxel_sound(659, .27, .42, "glass")
+            self.finish = make_voxel_sound(392, .82, .32, "glass")
+            self.music = make_ambient_melody()
+            self.music_channel.set_volume(0.7)
+            self.music_channel.play(self.music, loops=-1)
+            self.enabled = True
+        except pygame.error:
+            pass
+
+    def play(self, sound: pygame.mixer.Sound) -> None:
+        if self.enabled and sound:
+            sound.play()
+
+    def play_countdown(self, final: bool = False) -> None:
+        sound = self.countdown_final if final else self.countdown
+        if self.enabled and sound:
+            if self.countdown_channel:
+                self.countdown_channel.play(sound)
+            else:
+                sound.play()
 
 
 def regular_hex_points(pad: int = 1) -> List[Tuple[int, int]]:
@@ -115,12 +229,12 @@ PLAYABLE_CELLS: Set[Cell] = set(ALL_CELLS)
 
 
 class StrategyKind(Enum):
-    BUILDER = "Build safe loops"
-    RAIDER = "Claim border gaps"
-    GUARDIAN = "Guard home edge"
-    SPRINTER = "Fast wide loops"
-    THIEF = "Steal border gaps"
-    SCOUT = "Scout fresh space"
+    BUILDER = "Runs clean circles"
+    RAIDER = "Builds triangles"
+    GUARDIAN = "Hugs left wall"
+    SPRINTER = "Sharp zigzags"
+    THIEF = "Tight spiral"
+    SCOUT = "Hunts fresh cells"
 
 
 @dataclass
@@ -217,6 +331,8 @@ class LightSnake:
     last_gain: int = 0
     death_reason: str = ""
     death_flash: float = 0.0
+    pattern_step: int = 0
+    pattern_index: int = 0
 
     @property
     def protected(self) -> bool:
@@ -340,6 +456,8 @@ class Game:
         music_path: str = "",
         music_volume: float = 0.25,
         time_limit: int = MATCH_TIME_LIMIT_SECONDS,
+        audio_source: str = "auto",
+        audio_backend: str = "wasapi",
     ) -> None:
         pygame.init()
         pygame.display.set_caption(WINDOW_TITLE)
@@ -352,6 +470,10 @@ class Game:
         self.font_title = pygame.font.SysFont("arial", 27, bold=True)
         self.font_subtitle = pygame.font.SysFont("arial", 15, bold=True)
         self.font_winner = pygame.font.SysFont("arial", 38, bold=True)
+        self.sounds = SoundBank()
+        self.last_capture_sound = -1.0
+        self.last_erase_sound = -1.0
+        self.last_countdown_second: Optional[int] = None
         self.snakes: List[LightSnake] = []
         self.particles: List[Particle] = []
         self.bonus: Optional[Bonus] = None
@@ -378,6 +500,11 @@ class Game:
             end_delay_seconds=WINDOW_RECORD_END_DELAY_SECONDS,
             music_path=music_path,
             music_volume=music_volume,
+            capture_audio=True,
+            audio_source=audio_source,
+            audio_backend=audio_backend,
+            audio_volume=1.0,
+            pipe_video=True,
         )
         self.restart()
 
@@ -386,7 +513,7 @@ class Game:
         self.snakes = []
         self.particles = []
         self.bonus = None
-        self.bonus_timer = random.uniform(*BONUS_RESPAWN_SECONDS)
+        self.bonus_timer = 5.0
         self.initial_bonus_race = False
         self.eraser_ball = self.create_eraser_ball()
         self.paused = False
@@ -395,8 +522,9 @@ class Game:
         self.finish_reason = ""
         self.end_timer = 0.0
         self.match_time = 0.0
+        self.last_countdown_second = None
         self.create_snakes()
-        self.spawn_initial_bonus()
+        self.sounds.play(self.sounds.start)
 
     def create_eraser_ball(self) -> EraserBall:
         angle = random.uniform(0.0, math.tau)
@@ -411,12 +539,12 @@ class Game:
     def create_snakes(self) -> None:
         # Tune speed, starting cell, and one-cell home zone here.
         configs = [
-            ("GOLD", YELLOW, StrategyKind.BUILDER, (32, 14), (-1, 0), 1.00, {(32, 14)}, [(-1, 0), (0, 1), (1, 0), (0, -1)]),
-            ("MINT", GREEN, StrategyKind.GUARDIAN, (25, 28), (-1, 0), 0.96, {(25, 28)}, [(-1, 0), (0, -1), (1, 0), (0, 1)]),
-            ("ROSE", CORAL, StrategyKind.RAIDER, (8, 28), (1, 0), 0.98, {(8, 28)}, [(1, 0), (0, -1), (-1, 0), (0, 1)]),
-            ("AZUR", BLUE, StrategyKind.SPRINTER, (1, 14), (1, 0), 1.06, {(1, 14)}, [(1, 0), (0, 1), (-1, 0), (0, -1)]),
-            ("VIO", PURPLE, StrategyKind.THIEF, (8, 0), (1, 0), 1.07, {(8, 0)}, [(1, 0), (0, 1), (-1, 0), (0, -1)]),
-            ("TEAL", TEAL, StrategyKind.SCOUT, (25, 0), (-1, 0), 1.12, {(25, 0)}, [(-1, 0), (0, 1), (1, 0), (0, -1)]),
+            ("MAX", YELLOW, StrategyKind.BUILDER, (32, 14), (-1, 0), 1.00, {(32, 14)}, [(-1, 0), (0, 1), (1, 0), (0, -1)]),
+            ("LEO", GREEN, StrategyKind.GUARDIAN, (25, 28), (-1, 0), 0.96, {(25, 28)}, [(-1, 0), (0, -1), (1, 0), (0, 1)]),
+            ("MIA", CORAL, StrategyKind.RAIDER, (8, 28), (1, 0), 0.98, {(8, 28)}, [(1, 0), (0, -1), (-1, 0), (0, 1)]),
+            ("ZOE", BLUE, StrategyKind.SPRINTER, (1, 14), (1, 0), 1.06, {(1, 14)}, [(1, 0), (0, 1), (-1, 0), (0, -1)]),
+            ("NOA", PURPLE, StrategyKind.THIEF, (8, 0), (1, 0), 1.07, {(8, 0)}, [(1, 0), (0, 1), (-1, 0), (0, -1)]),
+            ("SAM", TEAL, StrategyKind.SCOUT, (25, 0), (-1, 0), 1.12, {(25, 0)}, [(-1, 0), (0, 1), (1, 0), (0, -1)]),
         ]
         for name, color, strategy, start, direction, speed, territory, opening_steps in configs:
             self.snakes.append(
@@ -525,6 +653,9 @@ class Game:
         owned_cleared = {cell for cell in cleared if self.cell_owner(cell)}
         if owned_cleared:
             self.clear_cells(owned_cleared)
+            if self.match_time - self.last_erase_sound > 0.18:
+                self.sounds.play(self.sounds.erase)
+                self.last_erase_sound = self.match_time
             if random.random() < 0.45:
                 self.emit_eraser_particles(random.choice(list(owned_cleared)))
 
@@ -781,10 +912,113 @@ class Game:
         forced_exit = self.force_exit_direction(snake)
         if forced_exit:
             return forced_exit
+
+        pattern_step = self.pattern_direction(snake)
+        if pattern_step:
+            return pattern_step
+
         fresh_step = self.fresh_cell_direction(snake)
         if fresh_step:
             return fresh_step
         return self.inside_direction(snake)
+
+    def nearest_playable_cell(self, target: Tuple[float, float]) -> Cell:
+        return min(ALL_CELLS, key=lambda cell: math.dist(cell, target))
+
+    def pattern_direction(self, snake: LightSnake) -> Optional[Vec]:
+        options = self.move_options(snake)
+        if not options:
+            return None
+
+        center = ((GRID_COLS - 1) / 2, (GRID_ROWS - 1) / 2)
+
+        def base_score(direction: Vec) -> float:
+            nxt = add_vec(snake.head, direction)
+            score = -self.head_pressure_at(snake, nxt) * 2.0
+            if self.cell_owner(nxt) is None:
+                score += 5.0
+            if direction == snake.direction:
+                score += 0.7
+            if self.trail_owner_at(nxt, exclude=snake):
+                score += 7.0
+            return score
+
+        def toward(target: Cell, direction: Vec) -> float:
+            return base_score(direction) - manhattan(add_vec(snake.head, direction), target) * 1.5
+
+        if snake.strategy == StrategyKind.BUILDER:
+            radius = 9.5
+
+            def circle_score(direction: Vec) -> float:
+                nxt = add_vec(snake.head, direction)
+                dx, dy = nxt[0] - center[0], nxt[1] - center[1]
+                distance = max(0.1, math.hypot(dx, dy))
+                tangent = (-dy / distance, dx / distance)
+                flow = direction[0] * tangent[0] + direction[1] * tangent[1]
+                return base_score(direction) + flow * 5.0 - abs(distance - radius) * 1.4
+
+            return max(options, key=circle_score)
+
+        if snake.strategy == StrategyKind.GUARDIAN:
+            nearby_rows = {snake.head[1] - 1, snake.head[1], snake.head[1] + 1}
+            left_edge = min((cell for cell in ALL_CELLS if cell[1] in nearby_rows), key=lambda cell: cell[0])
+            if snake.head[0] > left_edge[0] + 1:
+                return max(options, key=lambda direction: toward(left_edge, direction))
+            vertical = -1 if (snake.pattern_step // 13) % 2 == 0 else 1
+            return max(
+                options,
+                key=lambda direction: base_score(direction)
+                - add_vec(snake.head, direction)[0] * 2.4
+                + direction[1] * vertical * 4.0,
+            )
+
+        if snake.strategy == StrategyKind.RAIDER:
+            triangle = [
+                self.nearest_playable_cell((GRID_COLS / 2, 3)),
+                self.nearest_playable_cell((5, GRID_ROWS - 5)),
+                self.nearest_playable_cell((GRID_COLS - 6, GRID_ROWS - 5)),
+            ]
+            target = triangle[snake.pattern_index % len(triangle)]
+            if manhattan(snake.head, target) <= 2:
+                snake.pattern_index = (snake.pattern_index + 1) % len(triangle)
+                target = triangle[snake.pattern_index]
+            return max(options, key=lambda direction: toward(target, direction))
+
+        if snake.strategy == StrategyKind.SPRINTER:
+            zigzag = [
+                self.nearest_playable_cell((4, 5)),
+                self.nearest_playable_cell((GRID_COLS - 5, 9)),
+                self.nearest_playable_cell((4, 14)),
+                self.nearest_playable_cell((GRID_COLS - 5, 19)),
+                self.nearest_playable_cell((4, GRID_ROWS - 5)),
+            ]
+            target = zigzag[snake.pattern_index % len(zigzag)]
+            if manhattan(snake.head, target) <= 2:
+                snake.pattern_index = (snake.pattern_index + 1) % len(zigzag)
+                target = zigzag[snake.pattern_index]
+            return max(options, key=lambda direction: toward(target, direction) + (2.0 if direction == snake.direction else 0.0))
+
+        if snake.strategy == StrategyKind.THIEF:
+            cycle = snake.pattern_step % 72
+            radius = 11.5 - cycle * 0.12
+            angle = snake.pattern_step * 0.34
+            target = self.nearest_playable_cell(
+                (center[0] + math.cos(angle) * radius, center[1] + math.sin(angle) * radius)
+            )
+            return max(options, key=lambda direction: toward(target, direction))
+
+        if snake.strategy == StrategyKind.SCOUT:
+            fresh = self.neutral_cells()
+            if fresh:
+                owned_cells = snake.territory or {snake.head}
+                target = max(
+                    fresh,
+                    key=lambda cell: min(manhattan(cell, owned) for owned in owned_cells)
+                    - self.head_pressure_at(snake, cell) * 3,
+                )
+                return max(options, key=lambda direction: toward(target, direction))
+
+        return None
 
     def bonus_direction(self, snake: LightSnake) -> Optional[Vec]:
         if not self.bonus or snake.head_size > 1:
@@ -1005,6 +1239,10 @@ class Game:
             return
 
         self.match_time += dt
+        remaining = max(0, math.ceil(self.max_match_seconds - self.match_time))
+        if 0 < remaining <= 15 and remaining != self.last_countdown_second:
+            self.sounds.play_countdown(final=remaining <= 3)
+            self.last_countdown_second = remaining
         if self.match_time >= self.max_match_seconds:
             self.finish_match_by_time_limit()
             return
@@ -1070,10 +1308,12 @@ class Game:
             snake.direction = proposed_directions[snake]
             snake.add_motion_trail()
             snake.head = nxt
+            snake.pattern_step += 1
             collected_bonus = self.bonus is not None and proposed_sizes[snake] > snake.head_size
             if collected_bonus:
                 snake.head_size = 2
                 self.bonus = None
+                self.sounds.play(self.sounds.bonus)
                 if self.initial_bonus_race:
                     self.initial_bonus_race = False
                     for racer in self.snakes:
@@ -1089,6 +1329,11 @@ class Game:
                 snake.last_gain = len(new_cells)
                 snake.best_capture = max(snake.best_capture, len(new_cells))
                 self.emit_capture_particles(new_cells, snake.color if not collected_bonus else BONUS_COLOR)
+                if not collected_bonus and self.match_time - self.last_capture_sound > 0.09:
+                    if self.sounds.capture:
+                        sound = self.sounds.capture[snake.captures % len(self.sounds.capture)]
+                        self.sounds.play(sound)
+                    self.last_capture_sound = self.match_time
                 snake.safe_moves = 0
             snake.trail = []
         self.fill_surrounded_neutral_regions()
@@ -1125,6 +1370,7 @@ class Game:
             snake.last_gain = len(gained)
             snake.best_capture = max(snake.best_capture, len(gained))
             self.emit_capture_particles(gained, snake.color)
+            self.sounds.play(self.sounds.big_capture)
         snake.trail = []
         snake.safe_moves = 0
 
@@ -1183,6 +1429,7 @@ class Game:
         snake.final_cells = max(snake.final_cells, len(snake.territory))
         snake.death_reason = reason
         snake.death_flash = 1.0
+        self.sounds.play(self.sounds.death)
         burst_cells = [snake.head] + snake.trail[:10]
         for cell in burst_cells:
             self.emit_death_particles(cell, snake.color)
@@ -1243,6 +1490,7 @@ class Game:
         self.finish_reason = "TIME LIMIT"
         self.game_over = True
         self.end_timer = 0.0
+        self.sounds.play(self.sounds.finish)
 
     def draw(self) -> None:
         self.screen.fill(BG)
@@ -1258,25 +1506,54 @@ class Game:
         for particle in self.particles:
             particle.draw(self.screen)
         self.draw_scoreboard()
+        self.draw_countdown()
+        if self.match_time < 1.5 and not self.game_over:
+            self.draw_hook()
         if self.game_over and self.winner:
             self.draw_winner_screen()
         if self.paused:
             self.draw_pause()
         pygame.display.flip()
         self.window_recorder.start_if_pending()
+        if self.window_recorder.needs_video_frame():
+            self.window_recorder.write_video_frame(pygame.image.tostring(self.screen, "RGB"))
+
+    def draw_hook(self) -> None:
+        panel = pygame.Surface((300, 78), pygame.SRCALPHA)
+        pygame.draw.rect(panel, (8, 10, 18, 225), panel.get_rect(), border_radius=12)
+        pygame.draw.rect(panel, (*ERASER_COLOR, 210), panel.get_rect(), 2, border_radius=12)
+        self.screen.blit(panel, (30, 246))
+        hook = self.font_title.render("WHO CONTROLS THE BOARD?", True, WHITE)
+        threat = self.font_subtitle.render("DODGE THE ERASER", True, DANGER)
+        self.screen.blit(hook, hook.get_rect(center=(WIDTH // 2, 270)))
+        self.screen.blit(threat, threat.get_rect(center=(WIDTH // 2, 300)))
 
     def draw_header(self) -> None:
-        title = self.font_title.render("AI LIGHT SNAKES", True, WHITE)
-        subtitle = self.font_subtitle.render("Whose light owns the board?", True, (94, 125, 145))
-        remaining = max(0, int(self.max_match_seconds - self.match_time))
-        timer = self.font_small.render(f"{remaining // 60:02d}:{remaining % 60:02d}", True, MUTED)
+        title = self.font_title.render("PICK YOUR SNAKE", True, WHITE)
+        subtitle = self.font_subtitle.render("WHITE BALL ERASES TERRITORY", True, MUTED)
+        remaining = max(0, math.ceil(self.max_match_seconds - self.match_time))
+        timer = self.font_small.render(f"{remaining // 60:02d}:{remaining % 60:02d}", True, WHITE)
         self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 24)))
         self.screen.blit(subtitle, subtitle.get_rect(center=(WIDTH // 2, 50)))
         self.screen.blit(timer, timer.get_rect(center=(WIDTH // 2, 66)))
 
+    def draw_countdown(self) -> None:
+        remaining = max(0, math.ceil(self.max_match_seconds - self.match_time))
+        if 0 < remaining <= 15:
+            pulse = 1.0 + 0.18 * (0.5 + 0.5 * math.sin(self.match_time * math.tau * 2.0))
+            countdown = self.font_winner.render(str(remaining), True, DANGER if remaining <= 5 else WHITE)
+            countdown = pygame.transform.smoothscale(
+                countdown,
+                (int(countdown.get_width() * pulse), int(countdown.get_height() * pulse)),
+            )
+            glow = pygame.Surface((110, 75), pygame.SRCALPHA)
+            pygame.draw.ellipse(glow, (*DANGER, 42 if remaining <= 5 else 24), glow.get_rect())
+            self.screen.blit(glow, glow.get_rect(center=(WIDTH // 2, 103)))
+            self.screen.blit(countdown, countdown.get_rect(center=(WIDTH // 2, 103)))
+
     def draw_board(self) -> None:
         outline = board_outline_points()
-        pygame.draw.polygon(self.screen, (253, 254, 249), outline)
+        pygame.draw.polygon(self.screen, PANEL, outline)
 
         for cell in ALL_CELLS:
             owner = self.cell_owner(cell)
@@ -1286,15 +1563,15 @@ class Game:
                 pygame.draw.rect(self.screen, NEUTRAL_CELL, rect, border_radius=3)
                 pygame.draw.rect(self.screen, GRID, rect, 1, border_radius=3)
                 continue
-            amount = 0.33 if owner.alive else 0.18
+            amount = 0.68 if owner.alive else 0.28
             fill = mix(NEUTRAL_CELL, owner.color, amount)
             pygame.draw.rect(self.screen, fill, rect, border_radius=3)
             pygame.draw.rect(self.screen, GRID, rect, 1, border_radius=3)
             if owner.alive:
-                shine = mix(fill, (255, 255, 255), 0.35)
+                shine = mix(fill, (255, 255, 255), 0.55)
                 pygame.draw.circle(self.screen, shine, (x - 3, y - 3), 2)
 
-        pygame.draw.polygon(self.screen, (205, 214, 204), outline, 1)
+        pygame.draw.polygon(self.screen, (86, 101, 142), outline, 2)
 
     def draw_trails(self) -> None:
         for snake in self.snakes:
@@ -1315,7 +1592,7 @@ class Game:
         rect = pygame.Rect(12, SCORE_TOP, WIDTH - 24, HEIGHT - SCORE_TOP - 12)
         pygame.draw.rect(self.screen, PANEL, rect, border_radius=4)
         pygame.draw.rect(self.screen, (207, 216, 207), rect, 1, border_radius=4)
-        headers = ["NAME / AI STYLE", "CELLS", "PAINT", "STATUS"]
+        headers = ["SNAKE / STRATEGY", "CELLS", "PAINT", "STATUS"]
         xs = [22, 198, 240, 282]
         for header, x in zip(headers, xs):
             self.screen.blit(self.font_small.render(header, True, MUTED), (x, SCORE_TOP + 8))
@@ -1336,17 +1613,20 @@ class Game:
 
     def draw_winner_screen(self) -> None:
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        overlay.fill((246, 248, 242, 205))
+        overlay.fill((3, 5, 13, 220))
         self.screen.blit(overlay, (0, 0))
         panel = pygame.Rect(35, 205, WIDTH - 70, 210)
         pygame.draw.rect(self.screen, PANEL, panel, border_radius=4)
-        pygame.draw.rect(self.screen, self.winner.color, panel, 2, border_radius=4)
+        for width, alpha in ((14, 35), (7, 70), (2, 255)):
+            glow = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            pygame.draw.rect(glow, (*self.winner.color, alpha), panel.inflate(width, width), width, border_radius=10)
+            self.screen.blit(glow, (0, 0))
         winner_text = self.font_winner.render("WINNER", True, self.winner.color)
         name_text = self.font_title.render(self.winner.name, True, WHITE)
-        strat_text = self.font_subtitle.render(self.winner.strategy.value, True, (94, 125, 145))
+        strat_text = self.font_subtitle.render(self.winner.strategy.value, True, MUTED)
         score_text = self.font_subtitle.render(f"Cells {self.winner.owned_cells}  Paint {self.winner.captures}", True, WHITE)
         reason_text = self.font_small.render(self.finish_reason, True, MUTED)
-        restart_text = self.font_ui.render("Press R for new match", True, MUTED)
+        restart_text = self.font_ui.render("PRESS R TO REPLAY", True, MUTED)
         for surf, y in [(winner_text, 242), (name_text, 288), (strat_text, 325), (score_text, 352), (reason_text, 372), (restart_text, 390)]:
             self.screen.blit(surf, surf.get_rect(center=(WIDTH // 2, y)))
 
@@ -1416,6 +1696,17 @@ def parse_args() -> argparse.Namespace:
         default=MATCH_TIME_LIMIT_SECONDS,
         help=f"match time limit in seconds, default {MATCH_TIME_LIMIT_SECONDS}",
     )
+    parser.add_argument(
+        "--audio-source",
+        default="auto",
+        help="system-audio loopback device for recording, default auto",
+    )
+    parser.add_argument(
+        "--audio-backend",
+        choices=("dshow", "wasapi"),
+        default="wasapi",
+        help="ffmpeg audio capture backend, default wasapi loopback",
+    )
     return parser.parse_args()
 
 
@@ -1428,4 +1719,6 @@ if __name__ == "__main__":
         music_path=args.music,
         music_volume=args.music_volume,
         time_limit=args.time_limit,
+        audio_source=args.audio_source,
+        audio_backend=args.audio_backend,
     ).run()
