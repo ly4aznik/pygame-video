@@ -19,18 +19,19 @@ import pygame
 # ---------------------------
 # Quick tuning constants
 # ---------------------------
-WIDTH, HEIGHT = 360, 640
+WIDTH, HEIGHT = 480, 960
 WINDOW_TITLE = "AI Snake Battle"
 FPS = 60
-CELL_SIZE = 15
-GRID_COLS = 15
-GRID_ROWS = 22
+CELL_SIZE = 8
+GRID_COLS = 52
+GRID_ROWS = 52
 BOARD_LEFT = (WIDTH - GRID_COLS * CELL_SIZE) // 2
-BOARD_TOP = 75
+BOARD_TOP = 116
 BOARD_WIDTH = GRID_COLS * CELL_SIZE
 BOARD_HEIGHT = GRID_ROWS * CELL_SIZE
-SCORE_TOP = BOARD_TOP + BOARD_HEIGHT + 11
-MOVE_TICKS_PER_SECOND = 4.75
+CONTROL_TOP = BOARD_TOP + BOARD_HEIGHT + 18
+SCORE_TOP = CONTROL_TOP + 48
+MOVE_TICKS_PER_SECOND = 9.5
 FOOD_COUNT = 9
 INITIAL_LENGTH = 5
 MATCH_TIME_LIMIT_SECONDS = 180
@@ -40,12 +41,13 @@ WINDOW_RECORD_OUTPUT_SIZE = (1080, 1920)
 WINDOW_RECORD_END_DELAY_SECONDS = 1.0
 WINDOW_RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "window_recordings")
 
-BG = (246, 248, 242)
-PANEL = (255, 255, 250)
-GRID = (222, 228, 218)
-WHITE = (42, 50, 62)
-MUTED = (126, 137, 139)
-DANGER = (210, 93, 96)
+BG = (8, 10, 18)
+PANEL = (18, 22, 35)
+GRID = (38, 45, 65)
+NEUTRAL_CELL = (13, 17, 29)
+WHITE = (245, 247, 255)
+MUTED = (170, 178, 200)
+DANGER = (255, 70, 90)
 
 Vec = Tuple[int, int]
 Cell = Tuple[int, int]
@@ -125,6 +127,8 @@ class Snake:
     energy: float = 0.0
     trail: List[Tuple[float, float, float]] = field(default_factory=list)
     death_flash: float = 0.0
+    foods_eaten: int = 0
+    kills: int = 0
 
     @property
     def head(self) -> Cell:
@@ -186,6 +190,14 @@ def cell_center(cell: Cell) -> Tuple[int, int]:
     return BOARD_LEFT + cell[0] * CELL_SIZE + CELL_SIZE // 2, BOARD_TOP + cell[1] * CELL_SIZE + CELL_SIZE // 2
 
 
+def is_playable_cell(cell: Cell) -> bool:
+    if not (0 <= cell[0] < GRID_COLS and 0 <= cell[1] < GRID_ROWS):
+        return False
+    cx = (cell[0] + 0.5 - GRID_COLS / 2) / (GRID_COLS / 2)
+    cy = (cell[1] + 0.5 - GRID_ROWS / 2) / (GRID_ROWS / 2)
+    return cx * cx + cy * cy <= 0.96
+
+
 def add_vec(a: Cell, b: Vec) -> Cell:
     return a[0] + b[0], a[1] + b[1]
 
@@ -213,10 +225,10 @@ class Game:
         self.screen = pygame.display.set_mode((WIDTH, HEIGHT))
         self.clock = pygame.time.Clock()
         self.font_small = pygame.font.SysFont("arial", 8, bold=True)
-        self.font_ui = pygame.font.SysFont("arial", 11, bold=True)
-        self.font_title = pygame.font.SysFont("arial", 26, bold=True)
-        self.font_subtitle = pygame.font.SysFont("arial", 13, bold=True)
-        self.font_winner = pygame.font.SysFont("arial", 36, bold=True)
+        self.font_ui = pygame.font.SysFont("arial", 13, bold=True)
+        self.font_title = pygame.font.SysFont("arial", 29, bold=True)
+        self.font_subtitle = pygame.font.SysFont("arial", 14, bold=True)
+        self.font_winner = pygame.font.SysFont("arial", 42, bold=True)
         self.snakes: List[Snake] = []
         self.foods: List[Food] = []
         self.particles: List[Particle] = []
@@ -225,7 +237,11 @@ class Game:
         self.winner: Optional[Snake] = None
         self.finish_reason = ""
         self.end_timer = 0.0
+        self.notifications: List[Tuple[str, Tuple[int, int, int], float]] = []
+        self.ranking: List[Snake] = []
+        self.ranking_timer = 0.0
         self.match_time = 0.0
+        self.notifications = []
         self.max_match_seconds = max(1, time_limit)
         self.window_recorder = WindowRecorder(
             enabled=record_window,
@@ -260,11 +276,11 @@ class Game:
     def create_snakes(self) -> None:
         # Edit this list to add, remove, recolor, or retune AI players.
         configs = [
-            ("GREEDY", (221, 177, 76), StrategyKind.GREEDY, (4, 4), (1, 0), 1.05),
-            ("CAREFUL", (104, 166, 129), StrategyKind.CAREFUL, (10, 4), (-1, 0), 0.92),
-            ("AGGRO", (198, 104, 101), StrategyKind.AGGRESSIVE, (4, 16), (1, 0), 1.12),
-            ("HUNTER", (92, 139, 184), StrategyKind.HUNTER, (10, 16), (-1, 0), 1.0),
-            ("CHAOS", (150, 124, 180), StrategyKind.CHAOTIC, (7, 10), (0, -1), 1.2),
+            ("GREEDY", (255, 210, 75), StrategyKind.GREEDY, (15, 15), (1, 0), 1.05),
+            ("CAREFUL", (90, 240, 150), StrategyKind.CAREFUL, (37, 15), (-1, 0), 0.92),
+            ("AGGRO", (255, 70, 90), StrategyKind.AGGRESSIVE, (15, 37), (1, 0), 1.12),
+            ("HUNTER", (70, 150, 255), StrategyKind.HUNTER, (37, 37), (-1, 0), 1.0),
+            ("CHAOS", (190, 100, 255), StrategyKind.CHAOTIC, (26, 26), (0, -1), 1.2),
         ]
         for name, color, strategy, start, direction, speed in configs:
             body = [add_vec(start, (-direction[0] * i, -direction[1] * i)) for i in range(INITIAL_LENGTH)]
@@ -281,13 +297,18 @@ class Game:
     def spawn_food(self) -> None:
         occupied = set(self.occupied_cells().keys())
         occupied.update(food.cell for food in self.foods)
-        free = [(x, y) for x in range(GRID_COLS) for y in range(GRID_ROWS) if (x, y) not in occupied]
+        free = [
+            (x, y)
+            for x in range(GRID_COLS)
+            for y in range(GRID_ROWS)
+            if is_playable_cell((x, y)) and (x, y) not in occupied
+        ]
         if not free:
             return
         self.foods.append(Food(random.choice(free), pygame.time.get_ticks() / 1000.0))
 
     def in_bounds(self, cell: Cell) -> bool:
-        return 0 <= cell[0] < GRID_COLS and 0 <= cell[1] < GRID_ROWS
+        return is_playable_cell(cell)
 
     def legal_dirs(self, snake: Snake) -> List[Vec]:
         return [d for d in DIRS if snake.length <= 1 or not opposite(d, snake.direction)]
@@ -560,6 +581,11 @@ class Game:
             return
 
         self.match_time += dt
+        self.notifications = [item for item in self.notifications if item[2] > self.match_time]
+        self.ranking_timer -= dt
+        if self.ranking_timer <= 0:
+            self.ranking = sorted(self.snakes, key=lambda s: (-s.length, -s.score, s.name))
+            self.ranking_timer = 1.0
         if self.match_time >= self.max_match_seconds:
             self.finish_match_by_time_limit()
             return
@@ -598,7 +624,7 @@ class Game:
                 occupied_after_tail.pop(snake.body[-1], None)
 
         for snake, nxt in proposals.items():
-            if nxt[0] < 0 or nxt[0] >= GRID_COLS or nxt[1] < 0 or nxt[1] >= GRID_ROWS:
+            if not self.in_bounds(nxt):
                 dead[snake] = "wall"
             elif nxt in occupied_after_tail:
                 dead[snake] = "body"
@@ -657,8 +683,11 @@ class Game:
             snake.body.insert(0, nxt)
             if will_eat[snake]:
                 snake.score += 10
+                snake.foods_eaten += 1
                 eaten_foods.append(food_by_cell[nxt])
                 self.emit_food_particles(nxt, snake.color)
+                if snake.foods_eaten % 3 == 0:
+                    self.add_notification(f"{snake.name} ATE {snake.foods_eaten} FOOD", snake.color)
             else:
                 snake.body.pop()
 
@@ -670,9 +699,14 @@ class Game:
         if not snake.alive:
             return
         snake.alive = False
+        self.add_notification(f"{snake.name} WAS ELIMINATED", snake.color)
         snake.death_flash = 1.0
         for cell in snake.body[:12]:
             self.emit_death_particles(cell, snake.color)
+
+    def add_notification(self, text: str, color: Tuple[int, int, int]) -> None:
+        self.notifications.insert(0, (text, color, self.match_time + 5.0))
+        self.notifications = self.notifications[:3]
 
     def emit_food_particles(self, cell: Cell, color: Tuple[int, int, int]) -> None:
         x, y = cell_center(cell)
@@ -702,7 +736,9 @@ class Game:
     def finish_match_by_time_limit(self) -> None:
         if self.game_over:
             return
-        self.winner = max(self.snakes, key=lambda s: (s.score, s.length, int(s.alive)))
+        alive = [snake for snake in self.snakes if snake.alive]
+        contenders = alive or self.snakes
+        self.winner = max(contenders, key=lambda s: (s.length, s.score))
         self.finish_reason = "TIME LIMIT"
         self.game_over = True
         self.end_timer = 0.0
@@ -718,6 +754,7 @@ class Game:
             snake.draw(self.screen, self.font_small)
         for particle in self.particles:
             particle.draw(self.screen)
+        self.draw_notifications()
         self.draw_scoreboard()
         if self.game_over and self.winner:
             self.draw_winner_screen()
@@ -728,59 +765,92 @@ class Game:
 
     def draw_header(self) -> None:
         title = self.font_title.render("AI SNAKE BATTLE", True, WHITE)
-        subtitle = self.font_subtitle.render("Which strategy wins?", True, (94, 125, 145))
+        subtitle = self.font_subtitle.render("EAT FOOD. OUTLAST EVERY SNAKE.", True, MUTED)
         remaining = max(0, int(self.max_match_seconds - self.match_time))
-        timer = self.font_small.render(f"{remaining // 60:02d}:{remaining % 60:02d}", True, MUTED)
-        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 24)))
-        self.screen.blit(subtitle, subtitle.get_rect(center=(WIDTH // 2, 50)))
-        self.screen.blit(timer, timer.get_rect(center=(WIDTH // 2, 66)))
+        urgent = remaining <= 15
+        timer_font = self.font_title if urgent else self.font_subtitle
+        timer_color = DANGER if urgent else WHITE
+        timer = timer_font.render(f"{remaining // 60:02d}:{remaining % 60:02d}", True, timer_color)
+        self.screen.blit(title, title.get_rect(center=(WIDTH // 2, 30)))
+        self.screen.blit(subtitle, subtitle.get_rect(center=(WIDTH // 2, 62)))
+        self.screen.blit(timer, timer.get_rect(center=(WIDTH // 2, 91)))
 
     def draw_board(self) -> None:
-        board_rect = pygame.Rect(BOARD_LEFT - 3, BOARD_TOP - 3, BOARD_WIDTH + 6, BOARD_HEIGHT + 6)
-        pygame.draw.rect(self.screen, (253, 254, 249), board_rect, border_radius=6)
-        pygame.draw.rect(self.screen, (205, 214, 204), board_rect, 1, border_radius=6)
-        for x in range(GRID_COLS + 1):
-            sx = BOARD_LEFT + x * CELL_SIZE
-            pygame.draw.line(self.screen, GRID, (sx, BOARD_TOP), (sx, BOARD_TOP + BOARD_HEIGHT), 1)
-        for y in range(GRID_ROWS + 1):
-            sy = BOARD_TOP + y * CELL_SIZE
-            pygame.draw.line(self.screen, GRID, (BOARD_LEFT, sy), (BOARD_LEFT + BOARD_WIDTH, sy), 1)
+        for x in range(GRID_COLS):
+            for y in range(GRID_ROWS):
+                cell = (x, y)
+                if not is_playable_cell(cell):
+                    continue
+                rect = pygame.Rect(BOARD_LEFT + x * CELL_SIZE, BOARD_TOP + y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
+                pygame.draw.rect(self.screen, NEUTRAL_CELL, rect)
+                pygame.draw.rect(self.screen, GRID, rect, 1)
+        pygame.draw.ellipse(
+            self.screen,
+            (86, 102, 145),
+            (BOARD_LEFT, BOARD_TOP, BOARD_WIDTH, BOARD_HEIGHT),
+            2,
+        )
 
     def draw_scoreboard(self) -> None:
-        rect = pygame.Rect(12, SCORE_TOP, WIDTH - 24, HEIGHT - SCORE_TOP - 12)
+        self.draw_control_bar()
+        rect = pygame.Rect(20, SCORE_TOP, WIDTH - 40, HEIGHT - SCORE_TOP - 18)
         pygame.draw.rect(self.screen, PANEL, rect, border_radius=4)
-        pygame.draw.rect(self.screen, (207, 216, 207), rect, 1, border_radius=4)
-        headers = ["NAME", "AI", "SCORE", "LEN", "STATUS"]
-        xs = [22, 92, 178, 231, 274]
+        pygame.draw.rect(self.screen, GRID, rect, 1, border_radius=4)
+        headers = ["PLAYER / STRATEGY", "FOOD", "LENGTH", "STATUS"]
+        xs = [32, 250, 315, 390]
         for header, x in zip(headers, xs):
             self.screen.blit(self.font_small.render(header, True, MUTED), (x, SCORE_TOP + 8))
-        for index, snake in enumerate(self.snakes):
-            y = SCORE_TOP + 22 + index * 15
-            pygame.draw.circle(self.screen, snake.color, (24, y + 5), 4)
+        ranking = self.ranking or self.snakes
+        for index, snake in enumerate(ranking):
+            y = SCORE_TOP + 29 + index * 32
+            row = pygame.Rect(27, y - 4, WIDTH - 54, 28)
+            pygame.draw.rect(self.screen, (23, 28, 44) if snake.alive else (15, 18, 28), row, border_radius=4)
+            pygame.draw.circle(self.screen, snake.color if snake.alive else MUTED, (38, y + 9), 6)
             texts = [
-                (snake.name, 33, snake.color),
-                (snake.strategy.value, 92, WHITE),
-                (str(snake.score), 185, WHITE),
-                (str(snake.length), 236, WHITE),
-                ("alive" if snake.alive else "dead", 274, (80, 145, 103) if snake.alive else DANGER),
+                (f"{index + 1}. {snake.name}", 50, snake.color if snake.alive else MUTED),
+                (snake.strategy.value.upper(), 137, MUTED),
+                (str(snake.foods_eaten), 265, WHITE),
+                (str(snake.length), 333, WHITE),
+                ("ALIVE" if snake.alive else "DEAD", 393, (90, 240, 150) if snake.alive else DANGER),
             ]
             for text, x, color in texts:
                 self.screen.blit(self.font_ui.render(text, True, color), (x, y))
 
+    def draw_control_bar(self) -> None:
+        label = self.font_small.render("LIVE LENGTH SHARE", True, MUTED)
+        self.screen.blit(label, (BOARD_LEFT, CONTROL_TOP - 13))
+        total = sum(s.length for s in self.snakes) or 1
+        x = BOARD_LEFT
+        for snake in sorted(self.snakes, key=lambda s: -s.length):
+            width = round(BOARD_WIDTH * snake.length / total)
+            color = snake.color if snake.alive else tuple(c // 3 for c in snake.color)
+            pygame.draw.rect(self.screen, color, (x, CONTROL_TOP, width, 18))
+            x += width
+        pygame.draw.rect(self.screen, GRID, (BOARD_LEFT, CONTROL_TOP, BOARD_WIDTH, 18), 1, border_radius=3)
+
+    def draw_notifications(self) -> None:
+        for index, (text, color, _) in enumerate(self.notifications):
+            surface = self.font_small.render(text, True, WHITE)
+            rect = surface.get_rect(topright=(BOARD_LEFT + BOARD_WIDTH - 7, BOARD_TOP + 8 + index * 24))
+            panel = rect.inflate(16, 10)
+            pygame.draw.rect(self.screen, (18, 22, 35), panel, border_radius=4)
+            pygame.draw.rect(self.screen, color, panel, 1, border_radius=4)
+            self.screen.blit(surface, rect)
+
     def draw_winner_screen(self) -> None:
         overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        overlay.fill((246, 248, 242, 205))
+        overlay.fill((8, 10, 18, 220))
         self.screen.blit(overlay, (0, 0))
-        panel = pygame.Rect(35, 205, WIDTH - 70, 210)
+        panel = pygame.Rect(45, 285, WIDTH - 90, 260)
         pygame.draw.rect(self.screen, PANEL, panel, border_radius=4)
         pygame.draw.rect(self.screen, self.winner.color, panel, 2, border_radius=4)
         winner_text = self.font_winner.render("WINNER", True, self.winner.color)
         name_text = self.font_title.render(self.winner.name, True, WHITE)
         strat_text = self.font_subtitle.render(self.winner.strategy.value, True, (94, 125, 145))
-        score_text = self.font_subtitle.render(f"Score {self.winner.score}  Length {self.winner.length}", True, WHITE)
+        score_text = self.font_subtitle.render(f"FOOD {self.winner.foods_eaten}   LENGTH {self.winner.length}", True, WHITE)
         reason_text = self.font_small.render(self.finish_reason, True, MUTED)
         restart_text = self.font_ui.render("Press R for new match", True, MUTED)
-        for surf, y in [(winner_text, 242), (name_text, 288), (strat_text, 325), (score_text, 352), (reason_text, 372), (restart_text, 390)]:
+        for surf, y in [(winner_text, 325), (name_text, 380), (strat_text, 425), (score_text, 465), (reason_text, 495), (restart_text, 520)]:
             self.screen.blit(surf, surf.get_rect(center=(WIDTH // 2, y)))
 
     def draw_pause(self) -> None:

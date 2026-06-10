@@ -39,6 +39,7 @@ class WindowRecorder:
         audio_backend: str = "dshow",
         audio_volume: float = 1.0,
         pipe_video: bool = False,
+        final_speed: float = 1.0,
     ) -> None:
         self.enabled = enabled
         self.window_title = window_title
@@ -59,6 +60,7 @@ class WindowRecorder:
         self.audio_backend = audio_backend.lower().strip() or "dshow"
         self.audio_volume = max(0.0, min(2.0, audio_volume))
         self.pipe_video = pipe_video
+        self.final_speed = max(0.25, min(4.0, final_speed))
 
         self.match_index = 0
         self.process: Optional[subprocess.Popen] = None
@@ -458,24 +460,34 @@ class WindowRecorder:
             print("ffmpeg not found. Cannot create final-size recording.")
             return False
 
+        video_filter = (
+            "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709,"
+            f"scale={self.output_size[0]}:{self.output_size[1]}:"
+            "force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,"
+            f"pad={self.output_size[0]}:{self.output_size[1]}:"
+            "(ow-iw)/2:(oh-ih)/2:color=black,"
+            "fps=30,setsar=1,format=yuv420p"
+        )
+        if self.final_speed != 1.0:
+            video_filter = f"setpts=PTS/{self.final_speed}," + video_filter
+
         command = [
             ffmpeg,
             "-y",
             "-i",
             self.capture_path,
             "-vf",
-            (
-                "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709,"
-                f"scale={self.output_size[0]}:{self.output_size[1]}:flags=lanczos,"
-                "fps=30,setsar=1,format=yuv420p"
-            ),
+            video_filter,
             *self.encoder_args(self.video_encoder, fast=False),
             "-tag:v",
             "avc1",
             "-pix_fmt",
             "yuv420p",
-            "-c:a",
-            "copy",
+            *(
+                ["-filter:a", f"atempo={self.final_speed}", "-c:a", "aac", "-b:a", "192k"]
+                if self.capture_audio and self.final_speed != 1.0
+                else ["-c:a", "copy"]
+            ),
             "-movflags",
             "+faststart",
             self.video_path,

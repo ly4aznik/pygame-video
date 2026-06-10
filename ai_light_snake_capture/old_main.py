@@ -4,6 +4,7 @@ import json
 import math
 import os
 import random
+import struct
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
@@ -58,6 +59,7 @@ GRID = (38, 45, 65)
 WHITE = (245, 247, 255)
 MUTED = (170, 178, 200)
 DANGER = (255, 70, 90)
+SAFE = (90, 240, 150)
 NEUTRAL_CELL = (13, 17, 29)
 
 YELLOW = (255, 210, 75)
@@ -74,6 +76,56 @@ Cell = Tuple[int, int]
 Color = Tuple[int, int, int]
 
 DIRS: List[Vec] = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+
+
+def make_sound(frequency: float, duration: float, volume: float, slide: float = 0.0) -> pygame.mixer.Sound:
+    sample_rate = 44100
+    frames = bytearray()
+    count = int(sample_rate * duration)
+    for index in range(count):
+        progress = index / count
+        pitch = frequency * (1.0 + slide * progress)
+        envelope = math.sin(math.pi * progress) ** 0.45 * (1.0 - progress) ** 0.35
+        wave = math.sin(math.tau * pitch * index / sample_rate)
+        wave += 0.22 * math.sin(math.tau * pitch * 2.01 * index / sample_rate)
+        sample = int(max(-1.0, min(1.0, wave * envelope * volume)) * 32767)
+        frames.extend(struct.pack("<h", sample))
+    return pygame.mixer.Sound(buffer=bytes(frames))
+
+
+def make_voxel_sound(
+    frequency: float,
+    duration: float,
+    volume: float,
+    tone: str,
+    time_scale: float = 1.0,
+) -> pygame.mixer.Sound:
+    sample_rate = 44100
+    samples = array("h")
+    count = int(sample_rate * duration * time_scale)
+    rng = random.Random(int(frequency * 100 + duration * 1000))
+    for index in range(count):
+        progress = index / count
+        phase = math.tau * frequency * index / sample_rate
+        if tone == "block":
+            envelope = (1.0 - progress) ** 5
+            wave = 0.58 * (1.0 if math.sin(phase) >= 0 else -1.0)
+            wave += rng.uniform(-0.42, 0.42) * (1.0 - progress)
+        elif tone == "glass":
+            envelope = math.exp(-5.5 * progress)
+            wave = math.sin(phase) + 0.48 * math.sin(phase * 2.01) + 0.24 * math.sin(phase * 3.98)
+        elif tone == "sand":
+            envelope = (1.0 - progress) ** 3
+            wave = rng.uniform(-1.0, 1.0) * 0.72 + math.sin(phase) * 0.28
+        elif tone == "bass":
+            envelope = math.sin(math.pi * progress) ** 0.35 * (1.0 - progress) ** 1.8
+            wave = math.sin(phase) + 0.3 * math.sin(phase * 0.5)
+        else:
+            envelope = math.exp(-4.0 * progress)
+            wave = math.sin(phase) + 0.2 * math.sin(phase * 2.0)
+        sample = int(max(-1.0, min(1.0, wave * envelope * volume)) * 32767)
+        samples.append(sample)
+    return pygame.mixer.Sound(buffer=samples.tobytes())
 
 
 def make_cartoon_sound(
@@ -142,6 +194,29 @@ def make_ambient_melody(time_scale: float = 1.0) -> pygame.mixer.Sound:
         wave += math.sin(math.tau * note * 2.002 * time) * pluck * 0.028
         wave += math.sin(math.tau * bass_note * time) * math.exp(-4.0 * local) * 0.038
         samples.append(int(max(-1.0, min(1.0, wave)) * 32767))
+    return pygame.mixer.Sound(buffer=samples.tobytes())
+
+
+def make_death_alarm(time_scale: float = 1.0) -> pygame.mixer.Sound:
+    sample_rate = 44100
+    duration = 0.9 * time_scale
+    samples = array("h")
+    rng = random.Random(99173)
+    for index in range(int(sample_rate * duration)):
+        time = index / sample_rate
+        logical_time = time / time_scale
+        progress = time / duration
+        pitch = 92.0 - 38.0 * progress
+        phase = math.tau * pitch * time
+        impact_a = math.exp(-18.0 * logical_time)
+        impact_b = math.exp(-22.0 * max(0.0, logical_time - 0.24)) if logical_time >= 0.24 else 0.0
+        rumble = math.sin(phase) + 0.72 * math.sin(phase * 0.51)
+        crunch = rng.uniform(-1.0, 1.0) * (impact_a + impact_b * 0.8)
+        square = 1.0 if math.sin(phase * 1.9) >= 0 else -1.0
+        wave = rumble * (0.72 * impact_a + 0.62 * impact_b)
+        wave += crunch * 0.68 + square * impact_b * 0.38
+        wave = math.tanh(wave * 2.4)
+        samples.append(int(max(-1.0, min(1.0, wave * 0.98)) * 32767))
     return pygame.mixer.Sound(buffer=samples.tobytes())
 
 
@@ -269,42 +344,8 @@ def playable_cells() -> List[Cell]:
     return cells
 
 
-BOARD_OUTLINE: List[Tuple[int, int]] = regular_hex_points(pad=1)
 ALL_CELLS: List[Cell] = playable_cells()
 PLAYABLE_CELLS: Set[Cell] = set(ALL_CELLS)
-CELL_CENTERS: Dict[Cell, Tuple[int, int]] = {
-    cell: (
-        BOARD_LEFT + cell[0] * CELL_SIZE + CELL_SIZE // 2,
-        BOARD_TOP + cell[1] * CELL_SIZE + CELL_SIZE // 2,
-    )
-    for cell in ALL_CELLS
-}
-CELL_RECTS: Dict[Cell, pygame.Rect] = {
-    cell: pygame.Rect(
-        center[0] - CELL_SIZE // 2 + 1,
-        center[1] - CELL_SIZE // 2 + 1,
-        CELL_SIZE - 2,
-        CELL_SIZE - 2,
-    )
-    for cell, center in CELL_CENTERS.items()
-}
-CELL_FILL_RECTS: Dict[Cell, pygame.Rect] = {cell: rect.inflate(-2, -2) for cell, rect in CELL_RECTS.items()}
-NEAR_CELLS_CACHE: Dict[Tuple[Cell, int], Tuple[Cell, ...]] = {}
-
-
-def cells_near(cell: Cell, radius: int) -> Tuple[Cell, ...]:
-    key = (cell, radius)
-    cached = NEAR_CELLS_CACHE.get(key)
-    if cached is not None:
-        return cached
-    cx, cy = cell
-    result = tuple(
-        candidate
-        for candidate in ALL_CELLS
-        if abs(candidate[0] - cx) + abs(candidate[1] - cy) <= radius
-    )
-    NEAR_CELLS_CACHE[key] = result
-    return result
 
 
 class StrategyKind(Enum):
@@ -337,8 +378,10 @@ class Particle:
     def draw(self, surface: pygame.Surface) -> None:
         if self.life <= 0:
             return
-        fade = max(0.0, min(1.0, self.life / self.max_life))
-        pygame.draw.circle(surface, mix(BG, self.color, fade), (int(self.x), int(self.y)), max(1, int(self.radius)))
+        alpha = max(0, min(255, int(255 * self.life / self.max_life)))
+        layer = pygame.Surface((int(self.radius * 4), int(self.radius * 4)), pygame.SRCALPHA)
+        pygame.draw.circle(layer, (*self.color, alpha), (layer.get_width() // 2, layer.get_height() // 2), int(self.radius))
+        surface.blit(layer, (self.x - layer.get_width() / 2, self.y - layer.get_height() / 2))
 
 
 @dataclass
@@ -404,6 +447,7 @@ class LightSnake:
     territory: Set[Cell]
     alive: bool = True
     energy: float = 0.0
+    trail: List[Cell] = field(default_factory=list)
     motion_trail: List[Tuple[float, float, float]] = field(default_factory=list)
     opening_steps: List[Vec] = field(default_factory=list)
     safe_moves: int = 0
@@ -422,6 +466,11 @@ class LightSnake:
     @property
     def protected(self) -> bool:
         return self.alive and self.head in self.territory
+
+    @property
+    def score(self) -> int:
+        owned = len(self.territory) if self.alive else max(self.final_cells, len(self.territory))
+        return owned
 
     @property
     def owned_cells(self) -> int:
@@ -458,8 +507,10 @@ class LightSnake:
 
     def draw_head(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
         for x, y, life in self.motion_trail:
-            fade = max(0.0, min(1.0, life / 0.30))
-            pygame.draw.circle(surface, mix(BG, self.color, fade * 0.45), (int(x), int(y)), CELL_SIZE // 2)
+            alpha = int(60 * life / 0.30)
+            layer = pygame.Surface((CELL_SIZE * 2, CELL_SIZE * 2), pygame.SRCALPHA)
+            pygame.draw.circle(layer, (*self.color, alpha), (CELL_SIZE, CELL_SIZE), CELL_SIZE // 2)
+            surface.blit(layer, (x - CELL_SIZE, y - CELL_SIZE))
 
         x, y = self.head_center()
         if self.protected:
@@ -500,7 +551,7 @@ class LightSnake:
 
 
 def cell_center(cell: Cell) -> Tuple[int, int]:
-    return CELL_CENTERS[cell]
+    return BOARD_LEFT + cell[0] * CELL_SIZE + CELL_SIZE // 2, BOARD_TOP + cell[1] * CELL_SIZE + CELL_SIZE // 2
 
 
 def add_vec(a: Cell, b: Vec) -> Cell:
@@ -520,7 +571,11 @@ def mix(a: Color, b: Color, amount: float) -> Color:
 
 
 def board_outline_points() -> List[Tuple[int, int]]:
-    return BOARD_OUTLINE
+    return regular_hex_points(pad=1)
+
+
+def rect_cells(left: int, top: int, width: int, height: int) -> Set[Cell]:
+    return {(x, y) for x in range(left, left + width) for y in range(top, top + height)}
 
 
 class Game:
@@ -547,7 +602,8 @@ class Game:
         self.font_title = pygame.font.SysFont("arial", 40, bold=True)
         self.font_subtitle = pygame.font.SysFont("arial", 22, bold=True)
         self.font_winner = pygame.font.SysFont("arial", 57, bold=True)
-        self.sounds = SoundBank()
+        self.record_slow_motion = record_window
+        self.sounds = SoundBank(time_scale=2.0 if self.record_slow_motion else 1.0)
         self.last_capture_sound = -1.0
         self.last_erase_sound = -1.0
         self.last_countdown_second: Optional[int] = None
@@ -569,19 +625,7 @@ class Game:
         self.finish_reason = ""
         self.end_timer = 0.0
         self.match_time = 0.0
-        self.recorder_monitor_timer = 0.0
-        self.region_fill_timer = 0.0
         self.max_match_seconds = max(1, time_limit)
-        self.owner_by_cell: Dict[Cell, LightSnake] = {}
-        self._neutral_cells_cache: Optional[Set[Cell]] = None
-        self.board_base = self.build_board_base()
-        self.sprinter_waypoints = [
-            self.nearest_playable_cell((4, 5)),
-            self.nearest_playable_cell((GRID_COLS - 5, 9)),
-            self.nearest_playable_cell((4, 14)),
-            self.nearest_playable_cell((GRID_COLS - 5, 19)),
-            self.nearest_playable_cell((4, GRID_ROWS - 5)),
-        ]
         self.window_recorder = WindowRecorder(
             enabled=record_window,
             window_title=WINDOW_TITLE,
@@ -600,16 +644,16 @@ class Game:
             audio_backend=audio_backend,
             audio_volume=1.0,
             pipe_video=True,
-            final_speed=1.0,
+            final_speed=2.0 if record_window else 1.0,
         )
+        if self.record_slow_motion:
+            print("Recording stability mode: game runs at 0.5x; final video is rendered at 2x.")
         self.restart()
 
     def restart(self) -> None:
         self.close_gameplay_log()
         self.window_recorder.new_match()
         self.snakes = []
-        self.owner_by_cell = {}
-        self._neutral_cells_cache = None
         self.particles = []
         self.status_messages = []
         self.bonus = None
@@ -622,13 +666,10 @@ class Game:
         self.finish_reason = ""
         self.end_timer = 0.0
         self.match_time = 0.0
-        self.recorder_monitor_timer = 0.0
-        self.region_fill_timer = 0.0
         self.last_countdown_second = None
         self.pending_log_events = []
         self.last_snapshot_second = -1
         self.create_snakes()
-        self.rebuild_owner_cache()
         self.scoreboard_order = list(self.snakes)
         self.last_scoreboard_second = -1
         self.log_event("match_start", time_limit=self.max_match_seconds)
@@ -659,25 +700,6 @@ class Game:
                 LightSnake(name, color, strategy, start, direction, speed, set(territory), opening_steps=list(opening_steps))
             )
 
-    def rebuild_owner_cache(self) -> None:
-        self.owner_by_cell.clear()
-        for snake in self.snakes:
-            for cell in snake.territory:
-                self.owner_by_cell[cell] = snake
-        self._neutral_cells_cache = None
-
-    def invalidate_cell_cache(self) -> None:
-        self._neutral_cells_cache = None
-
-    def build_board_base(self) -> pygame.Surface:
-        surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-        pygame.draw.polygon(surface, PANEL, BOARD_OUTLINE)
-        for cell in ALL_CELLS:
-            rect = CELL_RECTS[cell]
-            pygame.draw.rect(surface, NEUTRAL_CELL, rect, border_radius=4)
-            pygame.draw.rect(surface, GRID, rect, 1, border_radius=4)
-        return surface
-
     def in_bounds(self, cell: Cell) -> bool:
         return cell in PLAYABLE_CELLS
 
@@ -691,61 +713,41 @@ class Game:
         }
 
     def can_occupy(self, snake: LightSnake, head: Cell, size: Optional[int] = None) -> bool:
-        head_size = snake.head_size if size is None else size
-        hx, hy = head
-
-        for dx in range(head_size):
-            for dy in range(head_size):
-                cell = (hx + dx, hy + dy)
-                if cell not in PLAYABLE_CELLS:
-                    return False
-                owner = self.owner_by_cell.get(cell)
-                if owner is not None and owner is not snake:
-                    return False
-
+        footprint = self.footprint_for(snake, head, size)
+        if any(cell not in PLAYABLE_CELLS for cell in footprint):
+            return False
+        if any(self.is_enemy_territory(snake, cell) for cell in footprint):
+            return False
         for other in self.snakes:
             if other is snake or not other.alive:
                 continue
-            ox, oy = other.head
-            if hx < ox + other.head_size and hx + head_size > ox and hy < oy + other.head_size and hy + head_size > oy:
+            if footprint & self.footprint_for(other):
                 return False
         return True
 
     def cell_owner(self, cell: Cell) -> Optional[LightSnake]:
-        return self.owner_by_cell.get(cell)
+        for snake in self.snakes:
+            if cell in snake.territory:
+                return snake
+        return None
 
     def is_enemy_territory(self, snake: LightSnake, cell: Cell) -> bool:
-        owner = self.owner_by_cell.get(cell)
+        owner = self.cell_owner(cell)
         return owner is not None and owner is not snake
 
     def clear_cells(self, cells: Set[Cell]) -> None:
         if not cells:
             return
-        for cell in cells:
-            owner = self.owner_by_cell.pop(cell, None)
-            if owner is not None:
-                owner.territory.discard(cell)
-        self.invalidate_cell_cache()
+        for snake in self.snakes:
+            snake.territory.difference_update(cells)
 
     def cells_touched_by_ball(self, ball: EraserBall) -> Set[Cell]:
         touch_radius = ball.radius + CELL_SIZE * 0.72
-        radius_sq = touch_radius * touch_radius
-        min_x = max(0, int((ball.x - touch_radius - BOARD_LEFT) // CELL_SIZE) - 1)
-        max_x = min(GRID_COLS - 1, int((ball.x + touch_radius - BOARD_LEFT) // CELL_SIZE) + 1)
-        min_y = max(0, int((ball.y - touch_radius - BOARD_TOP) // CELL_SIZE) - 1)
-        max_y = min(GRID_ROWS - 1, int((ball.y + touch_radius - BOARD_TOP) // CELL_SIZE) + 1)
-        touched: Set[Cell] = set()
-        for y in range(min_y, max_y + 1):
-            for x in range(min_x, max_x + 1):
-                cell = (x, y)
-                center = CELL_CENTERS.get(cell)
-                if center is None:
-                    continue
-                dx = center[0] - ball.x
-                dy = center[1] - ball.y
-                if dx * dx + dy * dy <= radius_sq:
-                    touched.add(cell)
-        return touched
+        return {
+            cell
+            for cell in ALL_CELLS
+            if math.dist(cell_center(cell), (ball.x, ball.y)) <= touch_radius
+        }
 
     def nearest_wall_normal(self, point: Tuple[float, float]) -> Tuple[float, float]:
         px, py = point
@@ -807,19 +809,43 @@ class Game:
             if math.dist((head_x, head_y), (ball.x, ball.y)) <= ball.radius + head_radius:
                 self.kill_snake(snake, "ERASED")
 
-        owned_cleared = cleared.intersection(self.owner_by_cell)
+        owned_cleared = {cell for cell in cleared if self.cell_owner(cell)}
         if owned_cleared:
             self.clear_cells(owned_cleared)
             if self.match_time - self.last_erase_sound > 0.18:
                 self.sounds.play(self.sounds.erase)
                 self.last_erase_sound = self.match_time
             if random.random() < 0.45:
-                self.emit_eraser_particles(random.choice(tuple(owned_cleared)))
+                self.emit_eraser_particles(random.choice(list(owned_cleared)))
+
+    def owned_by(self, snake: LightSnake) -> Set[Cell]:
+        return set(snake.territory)
+
+    def all_territory(self) -> Set[Cell]:
+        cells: Set[Cell] = set()
+        for snake in self.snakes:
+            cells.update(snake.territory)
+        return cells
+
+    def trail_owner_at(self, cell: Cell, exclude: Optional[LightSnake] = None) -> Optional[LightSnake]:
+        for snake in self.snakes:
+            if snake is exclude or not snake.alive:
+                continue
+            if cell in snake.trail:
+                return snake
+        return None
+
+    def alive_head_at(self, cell: Cell, exclude: Optional[LightSnake] = None) -> Optional[LightSnake]:
+        for snake in self.snakes:
+            if snake is exclude or not snake.alive:
+                continue
+            if cell in self.footprint_for(snake):
+                return snake
+        return None
 
     def neutral_cells(self) -> Set[Cell]:
-        if self._neutral_cells_cache is None:
-            self._neutral_cells_cache = PLAYABLE_CELLS.difference(self.owner_by_cell)
-        return self._neutral_cells_cache
+        owned = self.all_territory()
+        return {cell for cell in ALL_CELLS if cell not in owned}
 
     def bonus_spawn_cells(self) -> List[Cell]:
         cells = []
@@ -832,7 +858,7 @@ class Game:
             footprint = {(cell[0] + dx, cell[1] + dy) for dx in range(2) for dy in range(2)}
             if any(part not in PLAYABLE_CELLS for part in footprint):
                 continue
-            if any(part in self.owner_by_cell for part in footprint):
+            if any(self.cell_owner(part) is not None for part in footprint):
                 continue
             if footprint & occupied_heads:
                 continue
@@ -864,6 +890,15 @@ class Game:
         self.bonus_timer = random.uniform(*BONUS_RESPAWN_SECONDS)
         self.log_event("bonus_spawned", cell=self.bonus.cell)
 
+    def spawn_initial_bonus(self) -> None:
+        cells = self.bonus_spawn_cells()
+        if not cells:
+            self.spawn_bonus()
+            return
+        center = (BOARD_LEFT + BOARD_WIDTH / 2, BOARD_TOP + BOARD_HEIGHT / 2)
+        self.bonus = Bonus(min(cells, key=lambda cell: math.dist(cell_center(cell), center)))
+        self.initial_bonus_race = True
+
     def update_bonus(self, dt: float) -> None:
         if self.bonus:
             if self.bonus.cell not in self.neutral_cells():
@@ -892,17 +927,26 @@ class Game:
         return result
 
     def enemy_territory_cells(self, snake: LightSnake) -> Set[Cell]:
-        return {cell for cell, owner in self.owner_by_cell.items() if owner is not snake}
+        cells: Set[Cell] = set()
+        for other in self.snakes:
+            if other is not snake:
+                cells.update(other.territory)
+        return cells
 
     def neutral_cells_near_enemy(self, snake: LightSnake) -> Set[Cell]:
-        neutral = self.neutral_cells()
-        result: Set[Cell] = set()
-        for enemy_cell in self.enemy_territory_cells(snake):
-            for direction in DIRS:
-                cell = add_vec(enemy_cell, direction)
-                if cell in neutral:
-                    result.add(cell)
-        return result
+        enemy_cells = self.enemy_territory_cells(snake)
+        return {
+            cell
+            for cell in self.neutral_cells()
+            if any(add_vec(cell, direction) in enemy_cells for direction in DIRS)
+        }
+
+    def enemy_trail_cells(self, snake: LightSnake) -> Set[Cell]:
+        cells: Set[Cell] = set()
+        for other in self.snakes:
+            if other is not snake and other.alive:
+                cells.update(other.trail)
+        return cells
 
     def move_options(self, snake: LightSnake, allow_reverse: bool = False) -> List[Vec]:
         options = []
@@ -924,17 +968,6 @@ class Game:
             return None
 
         blocked = self.enemy_territory_cells(snake)
-        for other in self.snakes:
-            if other is not snake and other.alive:
-                blocked.update(self.footprint_for(other))
-
-        if snake.head_size == 1:
-            def can_step(cell: Cell) -> bool:
-                return cell in PLAYABLE_CELLS and cell not in blocked
-        else:
-            def can_step(cell: Cell) -> bool:
-                return self.can_occupy(snake, cell)
-
         seen = {snake.head}
         queue: List[Tuple[Cell, Vec]] = []
         nearest_target = min(targets, key=lambda cell: manhattan(snake.head, cell))
@@ -943,7 +976,7 @@ class Game:
         first_steps.sort(key=lambda d: manhattan(add_vec(snake.head, d), nearest_target))
         for direction in first_steps:
             nxt = add_vec(snake.head, direction)
-            if nxt in seen or not can_step(nxt):
+            if nxt in blocked or nxt in seen or not self.can_occupy(snake, nxt):
                 continue
             seen.add(nxt)
             queue.append((nxt, direction))
@@ -956,7 +989,7 @@ class Game:
                 return first_direction
             for direction in DIRS:
                 nxt = add_vec(cell, direction)
-                if nxt in seen or not can_step(nxt):
+                if nxt in seen or nxt in blocked or not self.can_occupy(snake, nxt):
                     continue
                 seen.add(nxt)
                 queue.append((nxt, first_direction))
@@ -964,6 +997,14 @@ class Game:
 
     def path_to_cell(self, snake: LightSnake, target: Cell) -> Optional[Vec]:
         return self.path_to_cells(snake, {target})
+
+    def tail_threat_distance(self, snake: LightSnake) -> int:
+        if not snake.trail:
+            return 99
+        enemies = [s for s in self.snakes if s is not snake and s.alive]
+        if not enemies:
+            return 99
+        return min(manhattan(enemy.head, cell) for enemy in enemies for cell in snake.trail)
 
     def head_pressure_at(self, snake: LightSnake, cell: Cell) -> float:
         pressure = 0.0
@@ -988,6 +1029,8 @@ class Game:
         snake: LightSnake,
         target: Optional[Cell],
         cautious: float,
+        territory_bonus: float,
+        trail_bonus: float = 28.0,
     ) -> Vec:
         options = self.move_options(snake)
         if not options:
@@ -1002,6 +1045,8 @@ class Game:
             owner = self.cell_owner(nxt)
             if owner is not None and owner is not snake:
                 value += 1000.0
+            if self.trail_owner_at(nxt, exclude=snake):
+                value -= trail_bonus
             if nxt not in snake.territory:
                 value -= 1.5
             return value
@@ -1101,6 +1146,8 @@ class Game:
                 score += 5.0
             if direction == snake.direction:
                 score += 0.7
+            if self.trail_owner_at(nxt, exclude=snake):
+                score += 7.0
             return score
 
         def toward(target: Cell, direction: Vec) -> float:
@@ -1108,12 +1155,19 @@ class Game:
 
         def follow_waypoints(points: List[Cell], reach: int = 1, momentum: float = 1.0) -> Vec:
             target = points[snake.pattern_index % len(points)]
-            radius = reach + 2
-            target_region = {cell for cell in cells_near(target, radius) if not self.is_enemy_territory(snake, cell)}
+            target_region = {
+                cell
+                for cell in ALL_CELLS
+                if manhattan(cell, target) <= reach + 2 and not self.is_enemy_territory(snake, cell)
+            }
             if snake.head in target_region:
                 snake.pattern_index = (snake.pattern_index + 1) % len(points)
                 target = points[snake.pattern_index]
-                target_region = {cell for cell in cells_near(target, radius) if not self.is_enemy_territory(snake, cell)}
+                target_region = {
+                    cell
+                    for cell in ALL_CELLS
+                    if manhattan(cell, target) <= reach + 2 and not self.is_enemy_territory(snake, cell)
+                }
             path_step = self.path_to_cells(snake, target_region)
             if path_step:
                 return path_step
@@ -1193,7 +1247,14 @@ class Game:
             return max(options, key=follow_score)
 
         if snake.strategy == StrategyKind.SPRINTER:
-            return follow_waypoints(self.sprinter_waypoints, reach=2, momentum=2.2)
+            zigzag = [
+                self.nearest_playable_cell((4, 5)),
+                self.nearest_playable_cell((GRID_COLS - 5, 9)),
+                self.nearest_playable_cell((4, 14)),
+                self.nearest_playable_cell((GRID_COLS - 5, 19)),
+                self.nearest_playable_cell((4, GRID_ROWS - 5)),
+            ]
+            return follow_waypoints(zigzag, reach=2, momentum=2.2)
 
         if snake.strategy == StrategyKind.THIEF:
             target_radius = max(3.0, 13.0 - snake.pattern_step * 0.07)
@@ -1282,6 +1343,18 @@ class Game:
             return step
         return None
 
+    def adjacent_enemy_tail_direction(self, snake: LightSnake) -> Optional[Vec]:
+        choices = []
+        for direction in self.move_options(snake):
+            nxt = add_vec(snake.head, direction)
+            owner = self.trail_owner_at(nxt, exclude=snake)
+            if owner:
+                choices.append((direction, owner))
+        if not choices:
+            return None
+        choices.sort(key=lambda item: (0 if item[1].strategy == StrategyKind.SPRINTER else 1, -len(item[1].trail)))
+        return choices[0][0]
+
     def inside_direction(self, snake: LightSnake) -> Vec:
         if snake.strategy == StrategyKind.BUILDER:
             exits = self.frontier_outside_cells(snake)
@@ -1291,52 +1364,134 @@ class Game:
             border = self.own_border_cells(snake)
             if border:
                 target = min(border, key=lambda cell: manhattan(snake.head, cell) + random.random() * 2)
-                return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.8)
+                return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.8, 2.0)
 
         if snake.strategy == StrategyKind.RAIDER:
             enemy_edges = self.neutral_cells_near_enemy(snake)
             if enemy_edges:
                 target = min(enemy_edges, key=lambda cell: manhattan(snake.head, cell))
-                return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.9)
+                return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.9, 5.0)
 
         if snake.strategy == StrategyKind.THIEF:
             enemy_edges = self.neutral_cells_near_enemy(snake)
             if enemy_edges:
                 target = min(enemy_edges, key=lambda cell: manhattan(snake.head, cell) - self.head_pressure_at(snake, cell))
-                return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.8)
+                return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.8, 6.2)
 
         if snake.strategy == StrategyKind.GUARDIAN:
+            close_trails = {cell for cell in self.enemy_trail_cells(snake) if manhattan(snake.head, cell) <= 8}
+            step = self.path_to_cells(snake, close_trails)
+            if step:
+                return step
             if random.random() < 0.34:
                 exits = self.frontier_outside_cells(snake)
                 target = min(exits, key=lambda cell: manhattan(snake.head, cell)) if exits else None
                 if target:
-                    return self.path_to_cell(snake, target) or self.best_direction(snake, target, 1.4)
+                    return self.path_to_cell(snake, target) or self.best_direction(snake, target, 1.4, 1.8)
             border = self.own_border_cells(snake)
             if border:
                 target = min(border, key=lambda cell: manhattan(snake.head, cell) + random.random() * 4)
-                return self.path_to_cell(snake, target) or self.best_direction(snake, target, 1.7)
+                return self.path_to_cell(snake, target) or self.best_direction(snake, target, 1.7, 1.2)
 
         if snake.strategy == StrategyKind.SPRINTER:
             outside = self.neutral_cells()
             if outside:
                 target = max(outside, key=lambda cell: manhattan(snake.head, cell) - self.head_pressure_at(snake, cell) * 2)
-                return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.7)
+                return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.7, 3.0)
 
         if snake.strategy == StrategyKind.SCOUT:
             exits = self.frontier_outside_cells(snake)
             if exits:
                 target = min(exits, key=lambda cell: manhattan(snake.head, cell) + self.head_pressure_at(snake, cell) * 2)
-                return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.9)
+                return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.9, 2.5)
 
         exits = self.frontier_outside_cells(snake)
         target = min(exits, key=lambda cell: manhattan(snake.head, cell)) if exits else None
-        return self.best_direction(snake, target, 1.0)
+        return self.best_direction(snake, target, 1.0, 2.0)
+
+    def outside_direction(self, snake: LightSnake) -> Vec:
+        home = set(snake.territory)
+        return_step = self.path_to_cells(snake, home)
+        threat = self.tail_threat_distance(snake)
+
+        if snake.strategy == StrategyKind.BUILDER:
+            limit = 9
+            if len(snake.trail) >= limit or threat <= 2:
+                if return_step:
+                    return return_step
+            target = self.choose_nearby_open_cell(snake, prefer_enemy=False)
+            return self.path_to_cell(snake, target) or self.best_direction(snake, target, 1.0, 2.0)
+
+        if snake.strategy == StrategyKind.RAIDER:
+            tail_step = self.path_to_cells(snake, self.enemy_trail_cells(snake))
+            if tail_step and threat > 2 and random.random() < 0.72:
+                return tail_step
+            if len(snake.trail) >= 10 or threat <= 3:
+                if return_step:
+                    return return_step
+            enemy_edges = self.neutral_cells_near_enemy(snake)
+            target = min(enemy_edges, key=lambda cell: manhattan(snake.head, cell)) if enemy_edges else self.choose_nearby_open_cell(snake, True)
+            return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.9, 5.5)
+
+        if snake.strategy == StrategyKind.THIEF:
+            tail_step = self.path_to_cells(snake, self.enemy_trail_cells(snake))
+            if tail_step and threat > 1:
+                return tail_step
+            if len(snake.trail) >= 10 or threat <= 2:
+                if return_step:
+                    return return_step
+            target = self.choose_nearby_open_cell(snake, prefer_enemy=True)
+            return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.85, 6.0)
+
+        if snake.strategy == StrategyKind.GUARDIAN:
+            if len(snake.trail) >= 5 or threat <= 3:
+                if return_step:
+                    return return_step
+            target = self.choose_nearby_open_cell(snake, prefer_enemy=False)
+            return self.path_to_cell(snake, target) or self.best_direction(snake, target, 1.7, 1.5)
+
+        if snake.strategy == StrategyKind.SPRINTER:
+            if len(snake.trail) >= 12 or threat <= 2:
+                if return_step:
+                    return return_step
+            target = self.choose_far_open_cell(snake)
+            return self.path_to_cell(snake, target) or self.best_direction(snake, target, 0.7, 3.0)
+
+        if snake.strategy == StrategyKind.SCOUT:
+            if len(snake.trail) >= 7 or threat <= 2:
+                if return_step:
+                    return return_step
+            target = self.choose_nearby_open_cell(snake, prefer_enemy=False)
+            return self.path_to_cell(snake, target) or self.best_direction(snake, target, 1.1, 2.0)
+
+        if return_step:
+            return return_step
+        return self.best_direction(snake, None, 1.0, 2.0)
+
+    def choose_nearby_open_cell(self, snake: LightSnake, prefer_enemy: bool) -> Cell:
+        candidates = self.neutral_cells_near_enemy(snake) if prefer_enemy else self.neutral_cells()
+        if not candidates:
+            candidates = {
+                cell
+                for cell in ALL_CELLS
+                if cell not in snake.territory and not self.is_enemy_territory(snake, cell)
+            }
+        if not candidates:
+            return snake.head
+        return min(candidates, key=lambda cell: manhattan(snake.head, cell) + self.head_pressure_at(snake, cell) * 2 + random.random() * 3)
+
+    def choose_far_open_cell(self, snake: LightSnake) -> Cell:
+        candidates = {
+            cell
+            for cell in ALL_CELLS
+            if cell not in snake.territory and not self.is_enemy_territory(snake, cell)
+        }
+        if not candidates:
+            return snake.head
+        return max(candidates, key=lambda cell: manhattan(snake.head, cell) - self.head_pressure_at(snake, cell) * 2 + random.random() * 2)
 
     def update(self, dt: float) -> None:
-        self.recorder_monitor_timer -= dt
-        if self.recorder_monitor_timer <= 0.0:
-            self.window_recorder.monitor()
-            self.recorder_monitor_timer = 0.25
+        self.window_recorder.monitor()
         self.sounds.update()
         if self.paused:
             return
@@ -1378,10 +1533,7 @@ class Game:
         if movers:
             self.resolve_moves(movers)
         self.update_eraser_ball(dt)
-        self.region_fill_timer -= dt
-        if self.region_fill_timer <= 0.0:
-            self.fill_surrounded_neutral_regions()
-            self.region_fill_timer = 0.18
+        self.check_game_over()
 
     def resolve_moves(self, movers: List[LightSnake]) -> None:
         proposals: Dict[LightSnake, Cell] = {}
@@ -1452,7 +1604,7 @@ class Game:
             stalled.discard(bonus_winner)
 
         for snake in stalled:
-            if snake.alive and snake.head in snake.territory:
+            if snake.alive and not snake.trail and snake.head in snake.territory:
                 snake.safe_moves += 1
 
         for snake in movers:
@@ -1491,19 +1643,51 @@ class Game:
                         self.sounds.play(sound)
                     self.last_capture_sound = self.match_time
                 snake.safe_moves = 0
+            snake.trail = []
+        self.fill_surrounded_neutral_regions()
+
+    def close_loop(self, snake: LightSnake) -> None:
+        boundary = set(snake.territory) | set(snake.trail)
+        reachable: Set[Cell] = set()
+        queue: List[Cell] = []
+
+        for cell in ALL_CELLS:
+            if cell in boundary:
+                continue
+            touches_outside = any(add_vec(cell, direction) not in PLAYABLE_CELLS for direction in DIRS)
+            if touches_outside and cell not in reachable:
+                reachable.add(cell)
+                queue.append(cell)
+
+        index = 0
+        while index < len(queue):
+            cell = queue[index]
+            index += 1
+            for direction in DIRS:
+                nxt = add_vec(cell, direction)
+                if not self.in_bounds(nxt) or nxt in boundary or nxt in reachable:
+                    continue
+                reachable.add(nxt)
+                queue.append(nxt)
+
+        enclosed = {cell for cell in ALL_CELLS if cell not in boundary and cell not in reachable}
+        gained = set(snake.trail) | enclosed
+        if gained:
+            self.claim_cells(snake, gained)
+            snake.captures += 1
+            snake.last_gain = len(gained)
+            snake.best_capture = max(snake.best_capture, len(gained))
+            self.emit_capture_particles(gained, snake.color)
+            self.maybe_add_capture_message(snake, len(gained))
+        snake.trail = []
+        snake.safe_moves = 0
 
     def claim_cells(self, snake: LightSnake, cells: Set[Cell]) -> None:
-        if not cells:
-            return
-        for cell in cells:
-            previous_owner = self.owner_by_cell.get(cell)
-            if previous_owner is snake:
+        for other in self.snakes:
+            if other is snake:
                 continue
-            if previous_owner is not None:
-                previous_owner.territory.discard(cell)
-            snake.territory.add(cell)
-            self.owner_by_cell[cell] = snake
-        self.invalidate_cell_cache()
+            other.territory.difference_update(cells)
+        snake.territory.update(cells)
 
     def fill_surrounded_neutral_regions(self) -> None:
         neutral = self.neutral_cells()
@@ -1557,14 +1741,15 @@ class Game:
         self.sounds.play_death()
         self.add_status_message(snake, "WAS ERASED")
         self.log_event("snake_killed", snake=snake.name, reason=reason, cell=snake.head)
-        burst_cells = [snake.head]
+        burst_cells = [snake.head] + snake.trail[:10]
         for cell in burst_cells:
             self.emit_death_particles(cell, snake.color)
+        snake.trail = []
 
     def emit_capture_particles(self, cells: Set[Cell], color: Color) -> None:
-        if not cells:
-            return
-        for cell in random.sample(tuple(cells), min(28, len(cells))):
+        sample = list(cells)
+        random.shuffle(sample)
+        for cell in sample[:28]:
             x, y = cell_center(cell)
             angle = random.random() * math.tau
             speed = random.uniform(18, 62)
@@ -1588,12 +1773,26 @@ class Game:
                 )
             )
 
+    def emit_cut_particles(self, trail: List[Cell], color: Color) -> None:
+        if not trail:
+            return
+        sample = trail[:]
+        random.shuffle(sample)
+        for cell in sample[:16]:
+            x, y = cell_center(cell)
+            angle = random.random() * math.tau
+            speed = random.uniform(35, 105)
+            self.particles.append(Particle(x, y, math.cos(angle) * speed, math.sin(angle) * speed, color, 0.62, 0.62, 2.5))
+
     def emit_death_particles(self, cell: Cell, color: Color) -> None:
         x, y = cell_center(cell)
         for _ in range(5):
             angle = random.random() * math.tau
             speed = random.uniform(35, 125)
             self.particles.append(Particle(x, y, math.cos(angle) * speed, math.sin(angle) * speed, color, 0.75, 0.75, 3))
+
+    def check_game_over(self) -> None:
+        return
 
     def add_status_message(self, snake: LightSnake, text: str) -> None:
         self.status_messages.insert(0, StatusMessage(snake.name, text, snake.color, self.match_time))
@@ -1637,6 +1836,7 @@ class Game:
         entry = {"time": round(self.match_time, 3), "event": event, **details}
         if self.gameplay_log_file:
             self.gameplay_log_file.write(json.dumps(entry, ensure_ascii=True) + "\n")
+            self.gameplay_log_file.flush()
         else:
             self.pending_log_events.append(entry)
 
@@ -1672,6 +1872,7 @@ class Game:
         self.screen.fill(BG)
         self.draw_header()
         self.draw_board()
+        self.draw_trails()
         if self.eraser_ball:
             self.eraser_ball.draw(self.screen)
         if self.bonus:
@@ -1741,12 +1942,14 @@ class Game:
             initial = self.font_small.render(message.snake_name[0], True, BG)
             initial.set_alpha(alpha)
             panel.blit(initial, initial.get_rect(center=(16, 20)))
-            name = self.font_tiny.render(message.snake_name, True, message.color)
-            event = self.font_tiny.render(message.text, True, WHITE)
+            name = self.font_small.render(message.snake_name, True, message.color)
+            event = self.font_small.render(message.text, True, WHITE)
             name.set_alpha(alpha)
             event.set_alpha(alpha)
-            panel.blit(name, (29, 5))
-            panel.blit(event, (29, 22))
+            name = pygame.transform.smoothscale(name, (max(1, int(name.get_width() * 0.82)), max(1, int(name.get_height() * 0.82))))
+            event = pygame.transform.smoothscale(event, (max(1, int(event.get_width() * 0.72)), max(1, int(event.get_height() * 0.72))))
+            panel.blit(name, (29, 3))
+            panel.blit(event, (29, 20))
             x = WIDTH - width - 11
             y = 114 + index * (height + 5)
             self.screen.blit(panel, (x, y))
@@ -1775,11 +1978,26 @@ class Game:
             self.screen.blit(countdown, countdown.get_rect(center=(WIDTH // 2, 154)))
 
     def draw_board(self) -> None:
-        self.screen.blit(self.board_base, (0, 0))
-        for cell, owner in self.owner_by_cell.items():
+        outline = board_outline_points()
+        pygame.draw.polygon(self.screen, PANEL, outline)
+
+        for cell in ALL_CELLS:
+            owner = self.cell_owner(cell)
+            x, y = cell_center(cell)
+            rect = pygame.Rect(x - CELL_SIZE // 2 + 1, y - CELL_SIZE // 2 + 1, CELL_SIZE - 2, CELL_SIZE - 2)
+            if not owner:
+                pygame.draw.rect(self.screen, NEUTRAL_CELL, rect, border_radius=4)
+                pygame.draw.rect(self.screen, GRID, rect, 1, border_radius=4)
+                continue
             amount = 0.68 if owner.alive else 0.28
-            pygame.draw.rect(self.screen, mix(NEUTRAL_CELL, owner.color, amount), CELL_FILL_RECTS[cell], border_radius=3)
-        pygame.draw.polygon(self.screen, (86, 101, 142), BOARD_OUTLINE, 3)
+            fill = mix(NEUTRAL_CELL, owner.color, amount)
+            pygame.draw.rect(self.screen, fill, rect, border_radius=4)
+            pygame.draw.rect(self.screen, GRID, rect, 1, border_radius=4)
+
+        pygame.draw.polygon(self.screen, (86, 101, 142), outline, 3)
+
+    def draw_trails(self) -> None:
+        return
 
     def draw_scoreboard(self) -> None:
         rect = pygame.Rect(16, SCORE_TOP, WIDTH - 32, HEIGHT - SCORE_TOP - 18)
@@ -1859,6 +2077,8 @@ class Game:
         while running:
             dt = self.clock.tick(FPS) / 1000.0
             running = self.handle_events()
+            if self.record_slow_motion:
+                dt *= 0.5
             self.update(dt)
             self.draw()
         self.window_recorder.stop()
