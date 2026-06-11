@@ -1,19 +1,27 @@
 import argparse
 from array import array
+import ctypes
 import json
 import math
 import os
 import random
 import sys
+import wave
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
+
+if sys.platform == "win32":
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except (AttributeError, OSError):
+        ctypes.windll.user32.SetProcessDPIAware()
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from window_recorder import WindowRecorder
+from ai_light_snake_capture.recording import FrameRecorder, RecordingUnavailable
 
 import pygame
 
@@ -21,25 +29,23 @@ import pygame
 # ---------------------------
 # Quick tuning constants
 # ---------------------------
-WIDTH, HEIGHT = 480, 960
+WIDTH, HEIGHT = 540, 960
 WINDOW_TITLE = "AI Light Snake Capture"
 FPS = 60
-CELL_SIZE = 9
+CELL_SIZE = 10
 GRID_COLS = 48
-GRID_ROWS = 41
+GRID_ROWS = 45
 BOARD_LEFT = (WIDTH - GRID_COLS * CELL_SIZE) // 2
 BOARD_TOP = 112
 BOARD_WIDTH = GRID_COLS * CELL_SIZE
 BOARD_HEIGHT = GRID_ROWS * CELL_SIZE
 TERRITORY_BAR_TOP = BOARD_TOP + BOARD_HEIGHT + 10
-SCORE_TOP = BOARD_TOP + BOARD_HEIGHT + 42
+SCORE_TOP = BOARD_TOP + BOARD_HEIGHT + 70
 MOVE_TICKS_PER_SECOND = 6.215625
-MATCH_TIME_LIMIT_SECONDS = 180
-WINDOW_RECORD_FPS = 30
-WINDOW_RECORD_CAPTURE_SIZE = (WIDTH, HEIGHT)
-WINDOW_RECORD_OUTPUT_SIZE = (1080, 1920)
-WINDOW_RECORD_END_DELAY_SECONDS = 1.0
-WINDOW_RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "window_recordings")
+MATCH_TIME_LIMIT_SECONDS = 60
+WINDOW_RECORD_FPS = FPS
+WINDOW_RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "captures")
+RECORDING_END_DELAY_SECONDS = 3.0
 SAFE_HOME_MOVE_LIMIT = 1
 BONUS_DETECTION_DISTANCE = GRID_COLS + GRID_ROWS
 BONUS_BIG_SNAKE_MIN_DISTANCE = 10
@@ -47,7 +53,8 @@ BONUS_REACHABILITY_CHECK_LIMIT = 70
 BONUS_RESPAWN_SECONDS = (7.0, 13.0)
 ERASER_BALL_RADIUS = 11
 ERASER_BALL_SPEED = 70.0
-ERASER_BOUNCE_SPEED_MULTIPLIER = 1.1
+ERASER_BOUNCE_SPEED_MULTIPLIER = 1.07
+ERASER_WALL_HOLE_RADIUS = ERASER_BALL_RADIUS + 6
 ERASER_EVADE_SECONDS = 2.8
 ERASER_EVADE_RADIUS = 56.0
 BIG_CAPTURE_MESSAGE_COOLDOWN = 3.0
@@ -148,6 +155,12 @@ def make_ambient_melody(time_scale: float = 1.0) -> pygame.mixer.Sound:
 class SoundBank:
     def __init__(self, time_scale: float = 1.0) -> None:
         self.enabled = False
+        self.recorder: Optional[FrameRecorder] = None
+        self.sound_names: Dict[int, str] = {}
+        self.raw_sounds: Dict[str, bytes] = {}
+        self.music_raw = b""
+        self.music_volume = 0.48
+        self.music_started_at: Optional[float] = None
         self.countdown_channel: Optional[pygame.mixer.Channel] = None
         self.music_channel: Optional[pygame.mixer.Channel] = None
         self.death_channel: Optional[pygame.mixer.Channel] = None
@@ -181,18 +194,51 @@ class SoundBank:
             self.countdown_final = make_cartoon_sound(570, .32, .52, "boing", time_scale)
             self.finish = make_cartoon_sound(350, .95, .44, "whistle", time_scale)
             self.music = make_ambient_melody(time_scale)
-            self.music_channel.set_volume(0.48)
+            named_sounds = {
+                "start": self.start,
+                "big_capture": self.big_capture,
+                "area_capture": self.area_capture,
+                "notification": self.notification,
+                "bonus": self.bonus,
+                "erase": self.erase,
+                "death": self.death,
+                "countdown": self.countdown,
+                "countdown_final": self.countdown_final,
+                "finish": self.finish,
+            }
+            named_sounds.update({f"capture_{index}": sound for index, sound in enumerate(self.capture)})
+            self.sound_names = {id(sound): name for name, sound in named_sounds.items()}
+            self.raw_sounds = {name: sound.get_raw() for name, sound in named_sounds.items()}
+            self.music_raw = self.music.get_raw()
+            self.music_channel.set_volume(self.music_volume)
             self.music_channel.play(self.music, loops=-1)
+            self.music_started_at = pygame.time.get_ticks() / 1000.0
             self.enabled = True
         except pygame.error:
             pass
 
+    def attach_recorder(self, recorder: Optional[FrameRecorder]) -> None:
+        self.recorder = recorder
+
+    def music_position(self) -> float:
+        if self.music_started_at is None:
+            return 0.0
+        return max(0.0, pygame.time.get_ticks() / 1000.0 - self.music_started_at)
+
+    def record(self, sound: Optional[pygame.mixer.Sound]) -> None:
+        if self.recorder and sound:
+            name = self.sound_names.get(id(sound))
+            if name:
+                self.recorder.record_sound(name)
+
     def play(self, sound: pygame.mixer.Sound) -> None:
+        self.record(sound)
         if self.enabled and sound:
             sound.play()
 
     def play_countdown(self, final: bool = False) -> None:
         sound = self.countdown_final if final else self.countdown
+        self.record(sound)
         if self.enabled and sound:
             if self.countdown_channel:
                 self.countdown_channel.play(sound)
@@ -200,6 +246,7 @@ class SoundBank:
                 sound.play()
 
     def play_death(self) -> None:
+        self.record(self.death)
         if self.enabled and self.death:
             if self.music_channel:
                 self.music_channel.set_volume(0.18)
@@ -210,6 +257,7 @@ class SoundBank:
                 self.death.play()
 
     def play_area_capture(self) -> None:
+        self.record(self.area_capture)
         if self.enabled and self.area_capture:
             if self.area_capture_channel:
                 self.area_capture_channel.play(self.area_capture)
@@ -217,6 +265,7 @@ class SoundBank:
                 self.area_capture.play()
 
     def play_notification(self) -> None:
+        self.record(self.notification)
         if self.enabled and self.notification:
             if self.notification_channel:
                 self.notification_channel.set_volume(1.0)
@@ -226,7 +275,48 @@ class SoundBank:
 
     def update(self) -> None:
         if self.enabled and self.music_channel and self.death_channel and not self.death_channel.get_busy():
-            self.music_channel.set_volume(0.48)
+            self.music_channel.set_volume(self.music_volume)
+
+    def write_recording_audio(
+        self,
+        path: str,
+        video_frames: int,
+        fps: int,
+        music_offset: float,
+        sound_events: List[Tuple[int, str]],
+    ) -> None:
+        sample_rate = 44100
+        total_samples = round(video_frames * sample_rate / fps)
+        music = array("h")
+        music.frombytes(self.music_raw)
+        music_offset_samples = round(music_offset * sample_rate)
+        mixed = array(
+            "h",
+            (
+                int(music[(music_offset_samples + index) % len(music)] * self.music_volume)
+                if music else 0
+                for index in range(total_samples)
+            ),
+        )
+        decoded_sounds: Dict[str, array] = {}
+        for name, raw in self.raw_sounds.items():
+            samples = array("h")
+            samples.frombytes(raw)
+            decoded_sounds[name] = samples
+        for video_frame, name in sound_events:
+            source = decoded_sounds.get(name)
+            if source is None:
+                continue
+            start = round(video_frame * sample_rate / fps)
+            count = min(len(source), total_samples - start)
+            for index in range(max(0, count)):
+                target = start + index
+                mixed[target] = max(-32768, min(32767, mixed[target] + source[index]))
+        with wave.open(str(path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(sample_rate)
+            wav.writeframes(mixed.tobytes())
 
 
 def regular_hex_points(pad: int = 1) -> List[Tuple[int, int]]:
@@ -369,6 +459,7 @@ class EraserBall:
     vx: float
     vy: float
     radius: int = ERASER_BALL_RADIUS
+    escaping: bool = False
 
     def update(self, dt: float) -> None:
         self.x += self.vx * dt
@@ -526,14 +617,10 @@ def board_outline_points() -> List[Tuple[int, int]]:
 class Game:
     def __init__(
         self,
-        record_window: bool = False,
+        record_window: bool = True,
         window_record_fps: int = WINDOW_RECORD_FPS,
         window_record_dir: str = WINDOW_RECORDINGS_DIR,
-        music_path: str = "",
-        music_volume: float = 0.25,
         time_limit: int = MATCH_TIME_LIMIT_SECONDS,
-        audio_source: str = "auto",
-        audio_backend: str = "wasapi",
     ) -> None:
         pygame.init()
         pygame.display.set_caption(WINDOW_TITLE)
@@ -563,13 +650,14 @@ class Game:
         self.bonus_timer = 0.0
         self.initial_bonus_race = False
         self.eraser_ball: Optional[EraserBall] = None
+        self.wall_holes: List[Tuple[float, float]] = []
         self.paused = False
         self.game_over = False
         self.winner: Optional[LightSnake] = None
         self.finish_reason = ""
         self.end_timer = 0.0
         self.match_time = 0.0
-        self.recorder_monitor_timer = 0.0
+        self.recorder: Optional[FrameRecorder] = None
         self.region_fill_timer = 0.0
         self.max_match_seconds = max(1, time_limit)
         self.owner_by_cell: Dict[Cell, LightSnake] = {}
@@ -582,31 +670,17 @@ class Game:
             self.nearest_playable_cell((GRID_COLS - 5, 19)),
             self.nearest_playable_cell((4, GRID_ROWS - 5)),
         ]
-        self.window_recorder = WindowRecorder(
-            enabled=record_window,
-            window_title=WINDOW_TITLE,
-            output_root=window_record_dir,
-            session_prefix="light_snakes",
-            video_filename="light_snakes_window.mp4",
-            music_filename="light_snakes_window_music.mp4",
-            fps=window_record_fps,
-            capture_size=WINDOW_RECORD_CAPTURE_SIZE,
-            output_size=WINDOW_RECORD_OUTPUT_SIZE,
-            end_delay_seconds=WINDOW_RECORD_END_DELAY_SECONDS,
-            music_path=music_path,
-            music_volume=music_volume,
-            capture_audio=True,
-            audio_source=audio_source,
-            audio_backend=audio_backend,
-            audio_volume=1.0,
-            pipe_video=True,
-            final_speed=1.0,
-        )
+        if record_window:
+            try:
+                self.recorder = FrameRecorder((WIDTH, HEIGHT), window_record_fps, self.sounds, window_record_dir)
+                self.sounds.attach_recorder(self.recorder)
+                print(f"Recording to {self.recorder.output_path}")
+            except RecordingUnavailable as error:
+                print(f"Recording disabled: {error}", file=sys.stderr)
         self.restart()
 
     def restart(self) -> None:
         self.close_gameplay_log()
-        self.window_recorder.new_match()
         self.snakes = []
         self.owner_by_cell = {}
         self._neutral_cells_cache = None
@@ -616,13 +690,13 @@ class Game:
         self.bonus_timer = 5.0
         self.initial_bonus_race = False
         self.eraser_ball = self.create_eraser_ball()
+        self.wall_holes = []
         self.paused = False
         self.game_over = False
         self.winner = None
         self.finish_reason = ""
         self.end_timer = 0.0
         self.match_time = 0.0
-        self.recorder_monitor_timer = 0.0
         self.region_fill_timer = 0.0
         self.last_countdown_second = None
         self.pending_log_events = []
@@ -747,11 +821,15 @@ class Game:
                     touched.add(cell)
         return touched
 
-    def nearest_wall_normal(self, point: Tuple[float, float]) -> Tuple[float, float]:
+    def nearest_wall_hit(
+        self,
+        point: Tuple[float, float],
+    ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
         px, py = point
         polygon = board_outline_points()
         best_distance = float("inf")
         best_normal = (1.0, 0.0)
+        best_closest = point
 
         for index, start in enumerate(polygon):
             end = polygon[(index + 1) % len(polygon)]
@@ -769,22 +847,49 @@ class Game:
             distance = math.hypot(dx, dy)
             if distance < best_distance:
                 best_distance = distance
+                best_closest = closest
                 if distance > 0:
                     best_normal = (dx / distance, dy / distance)
 
-        return best_normal
+        return best_normal, best_closest
+
+    def wall_has_hole_at(self, point: Tuple[float, float]) -> bool:
+        return any(math.dist(point, hole) <= ERASER_WALL_HOLE_RADIUS for hole in self.wall_holes)
+
+    def add_wall_hole(self, point: Tuple[float, float]) -> None:
+        if not self.wall_has_hole_at(point):
+            self.wall_holes.append(point)
 
     def update_eraser_ball(self, dt: float) -> None:
         if not self.eraser_ball:
             return
 
         ball = self.eraser_ball
+        if ball.escaping:
+            ball.update(dt)
+            margin = ball.radius + ERASER_WALL_HOLE_RADIUS
+            if (
+                ball.x < -margin
+                or ball.x > WIDTH + margin
+                or ball.y < -margin
+                or ball.y > HEIGHT + margin
+            ):
+                self.log_event("eraser_ball_escaped")
+                self.eraser_ball = None
+            return
+
         previous = (ball.x, ball.y)
         ball.update(dt)
         polygon = board_outline_points()
 
         if not point_in_polygon((ball.x, ball.y), polygon):
-            normal = self.nearest_wall_normal((ball.x, ball.y))
+            normal, wall_hit = self.nearest_wall_hit((ball.x, ball.y))
+            if self.wall_has_hole_at(wall_hit):
+                ball.escaping = True
+                self.log_event("eraser_ball_entered_hole", x=round(wall_hit[0], 2), y=round(wall_hit[1], 2))
+                return
+            self.add_wall_hole(wall_hit)
+            self.log_event("wall_hole_created", x=round(wall_hit[0], 2), y=round(wall_hit[1], 2))
             dot = ball.vx * normal[0] + ball.vy * normal[1]
             ball.vx -= 2 * dot * normal[0]
             ball.vy -= 2 * dot * normal[1]
@@ -1333,10 +1438,6 @@ class Game:
         return self.best_direction(snake, target, 1.0)
 
     def update(self, dt: float) -> None:
-        self.recorder_monitor_timer -= dt
-        if self.recorder_monitor_timer <= 0.0:
-            self.window_recorder.monitor()
-            self.recorder_monitor_timer = 0.25
         self.sounds.update()
         if self.paused:
             return
@@ -1350,7 +1451,6 @@ class Game:
 
         if self.game_over:
             self.end_timer += dt
-            self.window_recorder.stop_after_game_over(self.end_timer)
             return
 
         self.match_time += dt
@@ -1641,9 +1741,9 @@ class Game:
             self.pending_log_events.append(entry)
 
     def open_gameplay_log_if_ready(self) -> None:
-        if self.gameplay_log_file or not self.window_recorder.video_path:
+        if self.gameplay_log_file or not self.recorder:
             return
-        path = os.path.join(os.path.dirname(self.window_recorder.video_path), "gameplay_events.jsonl")
+        path = os.path.join(os.path.dirname(self.recorder.output_path), "gameplay_events.jsonl")
         self.gameplay_log_file = open(path, "w", encoding="utf-8")
         for entry in self.pending_log_events:
             self.gameplay_log_file.write(json.dumps(entry, ensure_ascii=True) + "\n")
@@ -1691,16 +1791,21 @@ class Game:
         if self.paused:
             self.draw_pause()
         pygame.display.flip()
-        self.window_recorder.start_if_pending()
         self.open_gameplay_log_if_ready()
-        if self.window_recorder.needs_video_frame():
-            self.window_recorder.write_video_frame(pygame.image.tostring(self.screen, "RGB"))
+        if self.recorder:
+            try:
+                self.recorder.write_frame(self.screen)
+            except RecordingUnavailable as error:
+                print(f"Recording stopped: {error}", file=sys.stderr)
+                self.sounds.attach_recorder(None)
+                self.recorder.abort()
+                self.recorder = None
 
     def draw_hook(self) -> None:
         panel = pygame.Surface((400, 117), pygame.SRCALPHA)
         pygame.draw.rect(panel, (8, 10, 18, 225), panel.get_rect(), border_radius=18)
         pygame.draw.rect(panel, (*ERASER_COLOR, 210), panel.get_rect(), 3, border_radius=18)
-        self.screen.blit(panel, (40, 369))
+        self.screen.blit(panel, panel.get_rect(center=(WIDTH // 2, 427)))
         hook = self.font_title.render("WHO CONTROLS THE BOARD?", True, WHITE)
         threat = self.font_subtitle.render("DODGE THE ERASER", True, DANGER)
         self.screen.blit(hook, hook.get_rect(center=(WIDTH // 2, 405)))
@@ -1780,6 +1885,10 @@ class Game:
             amount = 0.68 if owner.alive else 0.28
             pygame.draw.rect(self.screen, mix(NEUTRAL_CELL, owner.color, amount), CELL_FILL_RECTS[cell], border_radius=3)
         pygame.draw.polygon(self.screen, (86, 101, 142), BOARD_OUTLINE, 3)
+        for hole_x, hole_y in self.wall_holes:
+            center = (int(round(hole_x)), int(round(hole_y)))
+            pygame.draw.circle(self.screen, BG, center, ERASER_WALL_HOLE_RADIUS)
+            pygame.draw.circle(self.screen, (46, 54, 77), center, ERASER_WALL_HOLE_RADIUS, 2)
 
     def draw_scoreboard(self) -> None:
         rect = pygame.Rect(16, SCORE_TOP, WIDTH - 32, HEIGHT - SCORE_TOP - 18)
@@ -1861,7 +1970,15 @@ class Game:
             running = self.handle_events()
             self.update(dt)
             self.draw()
-        self.window_recorder.stop()
+            if self.game_over and self.end_timer >= RECORDING_END_DELAY_SECONDS:
+                running = False
+        if self.recorder:
+            self.sounds.attach_recorder(None)
+            try:
+                output_path = self.recorder.close()
+                print(f"Recording saved to {output_path}")
+            except RecordingUnavailable as error:
+                print(f"Could not finish recording: {error}", file=sys.stderr)
         self.close_gameplay_log()
         pygame.quit()
 
@@ -1869,9 +1986,10 @@ class Game:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AI Light Snake Capture pygame simulation")
     parser.add_argument(
-        "--record-window",
-        action="store_true",
-        help="record the pygame window with external ffmpeg and stop when the match ends",
+        "--no-record",
+        action="store_false",
+        dest="record_window",
+        help="disable automatic frame recording",
     )
     parser.add_argument(
         "--record-fps",
@@ -1885,32 +2003,10 @@ def parse_args() -> argparse.Namespace:
         help="folder for external window recordings",
     )
     parser.add_argument(
-        "--music",
-        default="",
-        help="path to a local stock music file to add after the match recording finishes",
-    )
-    parser.add_argument(
-        "--music-volume",
-        type=float,
-        default=0.25,
-        help="background music volume from 0.0 to 1.0, default 0.25",
-    )
-    parser.add_argument(
         "--time-limit",
         type=int,
         default=MATCH_TIME_LIMIT_SECONDS,
         help=f"match time limit in seconds, default {MATCH_TIME_LIMIT_SECONDS}",
-    )
-    parser.add_argument(
-        "--audio-source",
-        default="auto",
-        help="system-audio loopback device for recording, default auto",
-    )
-    parser.add_argument(
-        "--audio-backend",
-        choices=("dshow", "wasapi"),
-        default="wasapi",
-        help="ffmpeg audio capture backend, default wasapi loopback",
     )
     return parser.parse_args()
 
@@ -1921,9 +2017,5 @@ if __name__ == "__main__":
         record_window=args.record_window,
         window_record_fps=args.record_fps,
         window_record_dir=args.record_dir,
-        music_path=args.music,
-        music_volume=args.music_volume,
         time_limit=args.time_limit,
-        audio_source=args.audio_source,
-        audio_backend=args.audio_backend,
     ).run()

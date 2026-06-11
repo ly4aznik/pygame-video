@@ -17,6 +17,7 @@ ai_ring_pop_ball/window_recordings/
 ai_marble_race/window_recordings/
 ai_hex_territory/window_recordings/
 ai_light_snake_capture/window_recordings/
+ai_light_snake_capture/captures/
 frames/
 screenshot_*.png
 platformer_screenshot_*.png
