@@ -53,7 +53,7 @@ BONUS_REACHABILITY_CHECK_LIMIT = 70
 BONUS_RESPAWN_SECONDS = (7.0, 13.0)
 ERASER_BALL_RADIUS = 11
 ERASER_BALL_SPEED = 70.0
-ERASER_BOUNCE_SPEED_MULTIPLIER = 1.07
+ERASER_BOUNCE_SPEED_MULTIPLIER = 1.1
 ERASER_WALL_HOLE_RADIUS = ERASER_BALL_RADIUS + 6
 ERASER_EVADE_SECONDS = 2.8
 ERASER_EVADE_RADIUS = 56.0
@@ -1884,11 +1884,26 @@ class Game:
         for cell, owner in self.owner_by_cell.items():
             amount = 0.68 if owner.alive else 0.28
             pygame.draw.rect(self.screen, mix(NEUTRAL_CELL, owner.color, amount), CELL_FILL_RECTS[cell], border_radius=3)
-        pygame.draw.polygon(self.screen, (86, 101, 142), BOARD_OUTLINE, 3)
-        for hole_x, hole_y in self.wall_holes:
-            center = (int(round(hole_x)), int(round(hole_y)))
-            pygame.draw.circle(self.screen, BG, center, ERASER_WALL_HOLE_RADIUS)
-            pygame.draw.circle(self.screen, (46, 54, 77), center, ERASER_WALL_HOLE_RADIUS, 2)
+        wall_color = (86, 101, 142)
+        for index, start in enumerate(BOARD_OUTLINE):
+            end = BOARD_OUTLINE[(index + 1) % len(BOARD_OUTLINE)]
+            edge_x = end[0] - start[0]
+            edge_y = end[1] - start[1]
+            length = math.hypot(edge_x, edge_y)
+            steps = max(1, math.ceil(length / 3))
+            previous: Optional[Tuple[int, int]] = None
+            for step in range(steps + 1):
+                amount = step / steps
+                point = (
+                    int(round(start[0] + edge_x * amount)),
+                    int(round(start[1] + edge_y * amount)),
+                )
+                if self.wall_has_hole_at(point):
+                    previous = None
+                    continue
+                if previous is not None:
+                    pygame.draw.line(self.screen, wall_color, previous, point, 3)
+                previous = point
 
     def draw_scoreboard(self) -> None:
         rect = pygame.Rect(16, SCORE_TOP, WIDTH - 32, HEIGHT - SCORE_TOP - 18)
